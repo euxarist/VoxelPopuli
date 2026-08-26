@@ -49,7 +49,11 @@ pub fn generate_atlas_data() -> Vec<u8> {
         }
         for x in 6..10 {
             for y in 2..6 {
-                let (r, g, b) = if y <= 3 { (255, 230, 80) } else { (255, 120, 20) };
+                let (r, g, b) = if y <= 3 {
+                    (255, 230, 80)
+                } else {
+                    (255, 120, 20)
+                };
                 draw_pixel(5 * 16 + x, 7 * 16 + y, r, g, b, 255);
             }
         }
