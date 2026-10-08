@@ -176,11 +176,12 @@ impl MiningState {
 
         let block = world.get_block(res.x, res.y, res.z);
 
-        // Can't mine air, liquids, or bedrock
+        // Can't mine air, liquids, bedrock, or portal interiors
         if block == BlockType::Air
             || block == BlockType::Water
             || block == BlockType::Lava
             || block == BlockType::Bedrock
+            || block == BlockType::Portal
         {
             self.reset();
             return None;

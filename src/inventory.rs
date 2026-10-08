@@ -427,7 +427,9 @@ pub fn try_place_block_with_lock(
             return true;
         }
         let (nx, ny, nz) = (res.x + res.nx, res.y + res.ny, res.z + res.nz);
-        if !player.intersects_block(nx, ny, nz) && world.try_ignite(nx, ny, nz) {
+        if !player.intersects_block(nx, ny, nz)
+            && (world.try_light_portal(nx, ny, nz) || world.try_ignite(nx, ny, nz))
+        {
             damage_selected_tool(inv_slots, selected_slot);
             return true;
         }

@@ -261,6 +261,7 @@ pub struct World {
     pub active_water: std::collections::HashSet<(i32, i32, i32)>,
     pub active_falling: std::collections::HashSet<(i32, i32, i32)>,
     pub active_fire: std::collections::HashSet<(i32, i32, i32)>,
+    pub active_portal: std::collections::HashSet<(i32, i32, i32)>,
     pub water_tick_timer: f32,
     fire_timer: f32,
     night_spawn_timer: f32,
@@ -360,6 +361,7 @@ impl World {
             active_water: std::collections::HashSet::new(),
             active_falling: std::collections::HashSet::new(),
             active_fire: std::collections::HashSet::new(),
+            active_portal: std::collections::HashSet::new(),
             water_tick_timer: 0.0,
             fire_timer: 0.0,
             night_spawn_timer: 0.0,
@@ -1351,6 +1353,11 @@ impl World {
             } else {
                 self.active_fire.remove(&(x, y, z));
             }
+            if block == BlockType::Portal {
+                self.active_portal.insert((x, y, z));
+            } else {
+                self.active_portal.remove(&(x, y, z));
+            }
             // Neighbors might now be able to flow or fall
             let neighbors = [
                 (x, y + 1, z),
@@ -1436,6 +1443,123 @@ impl World {
         for (cx, cy, cz) in check_cacti {
             self.pop_unsupported_cacti(cx, cy, cz);
         }
+        // Portal breakage: a frame edit pops orphaned interior cells, which
+        // cascades through recursion the same way sunflower halves do.
+        if previous != block {
+            let mut check_portals = Vec::new();
+            if self.get_block(x, y, z) == BlockType::Portal {
+                check_portals.push((x, y, z));
+            }
+            for (dx, dy, dz) in [
+                (1, 0, 0),
+                (-1, 0, 0),
+                (0, 1, 0),
+                (0, -1, 0),
+                (0, 0, 1),
+                (0, 0, -1),
+            ] {
+                let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                if self.get_block(nx, ny, nz) == BlockType::Portal {
+                    check_portals.push((nx, ny, nz));
+                }
+            }
+            for (px, py, pz) in check_portals {
+                if self.get_block(px, py, pz) == BlockType::Portal
+                    && !self.is_portal_supported(px, py, pz)
+                {
+                    self.set_block(px, py, pz, BlockType::Air);
+                }
+            }
+        }
+    }
+
+    /// Light a nether portal with flint and steel: when (x, y, z) sits inside
+    /// a valid 4x5 obsidian frame, fill its 2x3 interior with Portal blocks.
+    /// Visuals only; nothing travels anywhere yet.
+    pub fn try_light_portal(&mut self, x: i32, y: i32, z: i32) -> bool {
+        let Some(((ox, oy, oz), along_x)) = self.portal_frame_origin(x, y, z) else {
+            return false;
+        };
+        for i in 0..2 {
+            for j in 0..3 {
+                let (cx, cy, cz) = if along_x {
+                    (ox + i, oy + j, oz)
+                } else {
+                    (ox, oy + j, oz + i)
+                };
+                if self.get_block(cx, cy, cz) != BlockType::Portal {
+                    self.set_block(cx, cy, cz, BlockType::Portal);
+                }
+            }
+        }
+        true
+    }
+
+    fn is_portal_supported(&self, x: i32, y: i32, z: i32) -> bool {
+        self.portal_frame_origin(x, y, z).is_some()
+    }
+
+    /// Locate a valid 4x5 obsidian frame whose 2x3 interior contains
+    /// (x, y, z). Frames stand in the XY plane (fixed z) or the ZY plane
+    /// (fixed x); frame corners may be any block, matching vanilla leniency.
+    fn portal_frame_origin(&self, x: i32, y: i32, z: i32) -> Option<((i32, i32, i32), bool)> {
+        for along_x in [true, false] {
+            for a in -1..=0 {
+                for oy in y - 2..=y {
+                    let (ox, oz) = if along_x { (x + a, z) } else { (x, z + a) };
+                    if !self.is_valid_portal_frame(ox, oy, oz, along_x) {
+                        continue;
+                    }
+                    let inside = if along_x {
+                        (ox..ox + 2).contains(&x) && (oy..oy + 3).contains(&y) && z == oz
+                    } else {
+                        x == ox && (oy..oy + 3).contains(&y) && (oz..oz + 2).contains(&z)
+                    };
+                    if inside {
+                        return Some(((ox, oy, oz), along_x));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn is_valid_portal_frame(&self, ox: i32, oy: i32, oz: i32, along_x: bool) -> bool {
+        let cell = |i: i32, j: i32| -> (i32, i32, i32) {
+            if along_x {
+                (ox + i, oy + j, oz)
+            } else {
+                (ox, oy + j, oz + i)
+            }
+        };
+        // Interior 2 wide by 3 tall must be empty, burning, or already portal.
+        for i in 0..2 {
+            for j in 0..3 {
+                let (cx, cy, cz) = cell(i, j);
+                if !matches!(
+                    self.get_block(cx, cy, cz),
+                    BlockType::Air | BlockType::Fire | BlockType::Portal
+                ) {
+                    return false;
+                }
+            }
+        }
+        // Outer 4x5 ring must be obsidian, except the corners.
+        for i in -1..=2 {
+            for j in -1..=3 {
+                if i != -1 && i != 2 && j != -1 && j != 3 {
+                    continue;
+                }
+                if (i == -1 || i == 2) && (j == -1 || j == 3) {
+                    continue;
+                }
+                let (cx, cy, cz) = cell(i, j);
+                if self.get_block(cx, cy, cz) != BlockType::Obsidian {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub fn is_cactus_supported(&self, x: i32, y: i32, z: i32) -> bool {
@@ -3491,7 +3615,11 @@ impl World {
             }
             if matches!(
                 b,
-                BlockType::Bedrock | BlockType::Obsidian | BlockType::Chest | BlockType::Furnace
+                BlockType::Bedrock
+                    | BlockType::Obsidian
+                    | BlockType::Portal
+                    | BlockType::Chest
+                    | BlockType::Furnace
             ) {
                 return false; // Cannot push immovable blocks
             }
@@ -3549,6 +3677,7 @@ impl World {
                 BlockType::Air
                     | BlockType::Bedrock
                     | BlockType::Obsidian
+                    | BlockType::Portal
                     | BlockType::Chest
                     | BlockType::Furnace
             ) {
@@ -4316,6 +4445,71 @@ mod tests {
             assert_eq!(world.get_block(8, 65, 8), BlockType::Air);
         }
         assert_eq!(world.dropped_items.len(), 1);
+    }
+
+    fn build_portal_frame(world: &mut World, ox: i32, oy: i32, oz: i32, along_x: bool) {
+        for i in -1..=2 {
+            for j in -1..=3 {
+                let interior = (0..2).contains(&i) && (0..3).contains(&j);
+                let corner = (i == -1 || i == 2) && (j == -1 || j == 3);
+                if interior || corner {
+                    continue;
+                }
+                let (fx, fy, fz) = if along_x {
+                    (ox + i, oy + j, oz)
+                } else {
+                    (ox, oy + j, oz + i)
+                };
+                world.set_block(fx, fy, fz, BlockType::Obsidian);
+            }
+        }
+    }
+
+    #[test]
+    fn flint_lights_portal_inside_obsidian_frame() {
+        for along_x in [true, false] {
+            let mut world = World::simulation(42);
+            world.insert_chunk(Chunk::new(0, 0, 42));
+            build_portal_frame(&mut world, 8, 60, 8, along_x);
+            assert!(world.try_light_portal(8, 61, 8));
+            for i in 0..2 {
+                for j in 0..3 {
+                    let (px, py, pz) = if along_x {
+                        (8 + i, 60 + j, 8)
+                    } else {
+                        (8, 60 + j, 8 + i)
+                    };
+                    assert_eq!(world.get_block(px, py, pz), BlockType::Portal);
+                }
+            }
+            assert_eq!(world.active_portal.len(), 6);
+            assert!(!world.try_light_portal(2, 61, 2));
+        }
+    }
+
+    #[test]
+    fn breaking_frame_pops_portal_interior() {
+        let mut world = World::simulation(42);
+        world.insert_chunk(Chunk::new(0, 0, 42));
+        build_portal_frame(&mut world, 8, 60, 8, true);
+        assert!(world.try_light_portal(8, 61, 8));
+        world.set_block(7, 60, 8, BlockType::Air);
+        for i in 0..2 {
+            for j in 0..3 {
+                assert_eq!(world.get_block(8 + i, 60 + j, 8), BlockType::Air);
+            }
+        }
+        assert!(world.active_portal.is_empty());
+    }
+
+    #[test]
+    fn pistons_refuse_portal_blocks() {
+        let mut world = World::simulation(42);
+        world.insert_chunk(Chunk::new(0, 0, 42));
+        build_portal_frame(&mut world, 8, 60, 8, true);
+        assert!(world.try_light_portal(8, 61, 8));
+        assert!(!world.push_piston(8, 61, 7, (0, 0, 1)));
+        assert_eq!(world.get_block(8, 61, 8), BlockType::Portal);
     }
 
     #[test]

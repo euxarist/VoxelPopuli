@@ -129,6 +129,7 @@ pub fn block_properties(b: BlockType) -> BlockProperties {
         Lava => s(-1.0, TT::None, TM::None, false, Air, 0),
         Air => s(0.0, TT::None, TM::None, false, Air, 0),
         Fire => s(0.0, TT::None, TM::None, false, Air, 0),
+        Portal => s(-1.0, TT::None, TM::None, false, Air, 0),
         MobSpawner => s(5.0, TT::Pickaxe, TM::Wood, true, Air, 0),
 
         // TNT drops itself
@@ -511,6 +512,7 @@ pub fn atlas_uv(b: BlockType) -> (u8, u8) {
         StickyPiston => (10, 6),
         PistonHead => (12, 6),
         Fire => (0, 11),
+        Portal => (9, 11),
 
         // Row 13: dyes
         WhiteDye => (0, 13),

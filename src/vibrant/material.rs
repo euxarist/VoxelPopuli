@@ -125,6 +125,7 @@ fn tile(tx: usize, ty: usize) -> Tile {
         (4..=11, 9) => (&[], Metal),
         (12..=15, 9) => (&[], Gem),
         (0..=7, 11) => (&["fire_0", "fire"], Flame),
+        (9, 11) => (&["nether_portal", "portal"], Flame),
         (0, 12) => (&["orange_wool", "wool_colored_orange"], Wool),
         (1, 12) => (&["magenta_wool", "wool_colored_magenta"], Wool),
         (2, 12) => (&["light_blue_wool", "wool_colored_light_blue"], Wool),
