@@ -264,11 +264,12 @@ pub enum BlockType {
     GreenDye,
     RedDye,
     BlackDye,
+    Portal,
 }
 
 #[allow(dead_code)]
 impl BlockType {
-    pub const COUNT: usize = 187;
+    pub const COUNT: usize = 188;
 
     pub fn from_u16(value: u16) -> Self {
         if (value as usize) < Self::COUNT {
@@ -391,6 +392,7 @@ impl BlockType {
             | BlockType::PistonHead
             | BlockType::Bell
             | BlockType::Fire
+            | BlockType::Portal
             | BlockType::WheatStage0
             | BlockType::WheatStage1
             | BlockType::WheatStage2 => false,
@@ -466,6 +468,7 @@ impl BlockType {
                 | BlockType::PistonHead
                 | BlockType::Bell
                 | BlockType::Fire
+                | BlockType::Portal
                 | BlockType::Cactus
                 | BlockType::Poppy
                 | BlockType::Dandelion
@@ -482,7 +485,7 @@ impl BlockType {
         match self {
             BlockType::Air => 0.0,
             BlockType::Bedrock => 3_600_000.0,
-            BlockType::Obsidian => 1200.0,
+            BlockType::Obsidian | BlockType::Portal => 1200.0,
             BlockType::Stone
             | BlockType::Cobblestone
             | BlockType::MossyCobblestone
@@ -558,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_count() {
-        assert_eq!(BlockType::COUNT, 187);
+        assert_eq!(BlockType::COUNT, 188);
     }
 
     #[test]
@@ -578,6 +581,9 @@ mod tests {
 
     #[test]
     fn test_fire_is_a_nonsolid_sprite_block() {
+        assert!(!BlockType::Portal.is_solid());
+        assert!(BlockType::Portal.is_transparent());
+        assert_eq!(BlockType::Portal.blast_resistance(), 1200.0);
         assert!(!BlockType::Fire.is_solid());
         assert!(BlockType::Fire.is_transparent());
         assert!(!BlockType::Fire.is_item());

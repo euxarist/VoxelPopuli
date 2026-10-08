@@ -197,6 +197,7 @@ pub fn classic_java_block_state(block: BlockType) -> Option<JavaBlockState> {
         StickyPiston => JavaBlockState::new("minecraft:sticky_piston"),
         PistonHead => JavaBlockState::new("minecraft:piston_head"),
         Fire => JavaBlockState::new("minecraft:fire"),
+        Portal => JavaBlockState::new("minecraft:nether_portal"),
 
         RawIron | IronIngot | FlintAndSteel | Stick | Coal | GoldIngot | Diamond | LapisLazuli
         | String | Gunpowder | Leather | RedstoneDust | WoodPickaxe | StonePickaxe
@@ -1359,6 +1360,7 @@ pub fn java_block_name_to_block_type(name: &str) -> BlockType {
         "minecraft:iron_block" => IronBlock,
         "minecraft:tnt" => TNT,
         "minecraft:fire" => Fire,
+        "minecraft:nether_portal" => Portal,
         "minecraft:cobblestone" => Cobblestone,
         "minecraft:oak_planks" => OakPlanks,
         "minecraft:crafting_table" => CraftingTable,

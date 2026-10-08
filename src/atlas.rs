@@ -2087,6 +2087,30 @@ pub fn generate_atlas_data() -> Vec<u8> {
         }
     }
 
+    // Portal tile (9, 11): deep-violet swirl with magenta and cyan wisps.
+    for x in 0..16i32 {
+        for y in 0..16i32 {
+            let swirl = crate::noise::noise_2d(x as f32 * 0.5 + y as f32 * 0.22, y as f32 * 0.5);
+            let band = ((x + y * 2) as f32 / 8.0 + swirl * 1.5).sin().abs();
+            let (r, g, b) = if band > 0.85 {
+                (200, 70, 255)
+            } else if band > 0.6 {
+                (120, 40, 220)
+            } else if swirl > 0.45 {
+                (60, 200, 230)
+            } else {
+                (70, 15, 140)
+            };
+            let px = 9 * 16 + x;
+            let py = 11 * 16 + y;
+            let idx = ((py * 256 + px) * 4) as usize;
+            data[idx] = r;
+            data[idx + 1] = g;
+            data[idx + 2] = b;
+            data[idx + 3] = 255;
+        }
+    }
+
     // Bee lifecycle tiles: original pixel art, row 14.
     for tile in 0..9usize {
         for y in 0..16usize {
@@ -2325,6 +2349,22 @@ mod tests {
             }
         }
         assert!(hot > 20, "fire base should have a hot core, got {hot}");
+    }
+
+    #[test]
+    fn portal_tile_is_opaque_and_violet() {
+        let data = generate_atlas_data();
+        let mut violet = 0;
+        for y in 0..TILE_SIZE {
+            for x in 0..TILE_SIZE {
+                let [r, g, b, a] = pixel(&data, 9 * TILE_SIZE + x, 11 * TILE_SIZE + y);
+                assert_eq!(a, 255, "portal tile stays opaque");
+                if b > 120 && b > g && r as u16 + b as u16 > 200 {
+                    violet += 1;
+                }
+            }
+        }
+        assert!(violet > 200, "portal tile should read violet, got {violet}");
     }
 
     #[test]

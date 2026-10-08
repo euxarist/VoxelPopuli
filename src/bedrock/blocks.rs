@@ -37,7 +37,7 @@ pub fn state(block: BlockType, liquid_depth: u8) -> Option<NbtTag> {
         TNT => vec![("explode_bit", Byte(0))],
         Furnace | Chest => vec![("minecraft:cardinal_direction", Text("north".into()))],
         Torch | RedstoneTorch => vec![("torch_facing_direction", Text("top".into()))],
-        Cactus | Fire => vec![("age", Int(0))],
+        Cactus | Fire | Portal => vec![("age", Int(0))],
         Farmland => vec![("moisturized_amount", Int(7))],
         Wheat | WheatStage0 | WheatStage1 | WheatStage2 => vec![(
             "growth",

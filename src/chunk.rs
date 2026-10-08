@@ -496,6 +496,7 @@ fn compute_lighting(
                     BlockType::Torch => 14,
                     BlockType::RedstoneTorch => 7,
                     BlockType::Lava | BlockType::Fire => 15,
+                    BlockType::Portal => 11,
                     _ => 0,
                 };
                 if emitted > 0 {
@@ -1528,10 +1529,18 @@ impl Chunk {
             self.dirty = true;
             if matches!(
                 block,
-                BlockType::Torch | BlockType::RedstoneTorch | BlockType::Lava | BlockType::Fire
+                BlockType::Torch
+                    | BlockType::RedstoneTorch
+                    | BlockType::Lava
+                    | BlockType::Fire
+                    | BlockType::Portal
             ) || matches!(
                 old_block,
-                BlockType::Torch | BlockType::RedstoneTorch | BlockType::Lava | BlockType::Fire
+                BlockType::Torch
+                    | BlockType::RedstoneTorch
+                    | BlockType::Lava
+                    | BlockType::Fire
+                    | BlockType::Portal
             ) {
                 self.calculate_lighting();
             }
@@ -2215,7 +2224,7 @@ impl ChunkData {
                         continue;
                     }
 
-                    let (v, t, n, c) = if block == BlockType::Glass {
+                    let (v, t, n, c) = if block == BlockType::Glass || block == BlockType::Portal {
                         (&mut v_tr, &mut t_tr, &mut n_tr, &mut c_tr)
                     } else {
                         (&mut v_op, &mut t_op, &mut n_op, &mut c_op)
