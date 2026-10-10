@@ -1,8 +1,11 @@
 use crate::block::BlockType;
 use crate::chunk::{
-    CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, Chunk, MeshResult, MeshSnapshot, light_factor,
-    pack_light, unpack_light, water_decay, water_is_falling, water_is_source,
-    water_level_from_decay,
+    BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_SPAN_X,
+    CHUNK_SPAN_Y, CHUNK_SPAN_Z, CHUNK_WIDTH, Chunk, MeshResult, MeshSnapshot, block_center_x,
+    block_center_y, block_center_z, block_origin_x, block_origin_y, block_origin_z,
+    chunk_of_world_x, chunk_of_world_z, light_factor, pack_light, unpack_light, water_decay,
+    water_is_falling, water_is_source, water_level_from_decay, world_to_block_x, world_to_block_y,
+    world_to_block_z,
 };
 use crate::mob::{Mob, MobKind};
 use crate::mob_catalog::Motion;
@@ -106,6 +109,12 @@ pub const CLOUD_HEIGHT: f32 = 200.0;
 // Upper bound on chunk-generation jobs queued to the worker pool; bounds
 // memory for finished-but-unintegrated chunks without starving meshing jobs.
 const MAX_GEN_IN_FLIGHT: usize = 64;
+// Loading used to upload every finished mesh before presenting again. Each
+// upload builds a GPU buffer on this thread, so one catch-up pass froze the
+// loading screen once a chunk held four times as many columns. The count is
+// the backstop; the two-millisecond budget still applies between uploads.
+const LOADING_MESH_UPLOADS_PER_UPDATE: usize = 8;
+const MAX_LOADING_MESH_IN_FLIGHT: i32 = 32;
 // Radius the GPU voxel pool mirrors for meshing. Kept at the max CPU view
 // distance so settings cannot request a larger GPU neighborhood than we
 // allocated.
@@ -474,8 +483,8 @@ impl World {
         for drop in &self.dropped_items {
             if self
                 .get_chunk(
-                    (drop.position.x.floor() as i32).div_euclid(16),
-                    (drop.position.z.floor() as i32).div_euclid(16),
+                    chunk_of_world_x(drop.position.x),
+                    chunk_of_world_z(drop.position.z),
                 )
                 .is_none()
             {
@@ -824,10 +833,8 @@ impl World {
     pub fn restore_skeletons(&mut self, saved: &[crate::save::SkeletonSave]) {
         for record in saved.iter().take(MOB_CAP.saturating_sub(self.mobs.len())) {
             let mob = record.restore();
-            self.spawned_natural_chunks.insert((
-                (mob.home.x / CHUNK_WIDTH as f32).floor() as i32,
-                (mob.home.z / CHUNK_DEPTH as f32).floor() as i32,
-            ));
+            self.spawned_natural_chunks
+                .insert((chunk_of_world_x(mob.home.x), chunk_of_world_z(mob.home.z)));
             self.mobs.push(mob);
         }
     }
@@ -1015,9 +1022,9 @@ impl World {
         for _ in 0..16 {
             let dx = (rand::random::<f32>() * 2.0 - 1.0) * max_range;
             let dz = (rand::random::<f32>() * 2.0 - 1.0) * max_range;
-            let tx = (origin.x + dx).floor() as i32;
-            let tz = (origin.z + dz).floor() as i32;
-            let center_y = origin.y.floor() as i32;
+            let tx = world_to_block_x(origin.x + dx);
+            let tz = world_to_block_z(origin.z + dz);
+            let center_y = world_to_block_y(origin.y);
             for dy in -8..=8 {
                 let ty = center_y + dy;
                 if ty <= 1 || ty >= CHUNK_HEIGHT as i32 - 4 {
@@ -1034,7 +1041,7 @@ impl World {
                         b == BlockType::Air || b == BlockType::SnowLayer
                     });
                     if clearance {
-                        return Some(Vec3::new(tx as f32 + 0.5, ty as f32, tz as f32 + 0.5));
+                        return Some(Vec3::new(block_center_x(tx), ty as f32, block_center_z(tz)));
                     }
                 }
             }
@@ -1143,9 +1150,9 @@ impl World {
                 self.arrows[a_idx].velocity = vel;
 
                 let next_pos = self.arrows[a_idx].position + vel * dt;
-                let bx = next_pos.x.floor() as i32;
-                let by = next_pos.y.floor() as i32;
-                let bz = next_pos.z.floor() as i32;
+                let bx = world_to_block_x(next_pos.x);
+                let by = world_to_block_y(next_pos.y);
+                let bz = world_to_block_z(next_pos.z);
 
                 if self.get_block(bx, by, bz).is_solid() {
                     self.arrows[a_idx].in_ground = true;
@@ -1269,9 +1276,9 @@ impl World {
     /// Sky/block lighting at `pos` for entity draws. `a = 1` tells the
     /// G-buffer shader to use this instead of the mesh vertex colour.
     pub fn entity_lighting(&self, pos: Vec3) -> glam::Vec4 {
-        let x = pos.x.floor() as i32;
-        let y = (pos.y + 0.1).floor() as i32;
-        let z = pos.z.floor() as i32;
+        let x = world_to_block_x(pos.x);
+        let y = world_to_block_y(pos.y + 0.1);
+        let z = world_to_block_z(pos.z);
         let (sky, block) = unpack_light(self.packed_light(x, y, z));
         glam::Vec4::new(light_factor(sky), light_factor(block), 1.0, 1.0)
     }
@@ -1322,7 +1329,7 @@ impl World {
         self.dropped_items.extend(contents.into_iter().map(|stack| {
             crate::inventory::DroppedItem::new(
                 stack,
-                Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                Vec3::new(block_center_x(x), block_center_y(y), block_center_z(z)),
                 Vec3::Y,
             )
         }));
@@ -1421,7 +1428,7 @@ impl World {
             self.set_block(x, y + 1, z, BlockType::Air);
             self.dropped_items.push(crate::inventory::DroppedItem::new(
                 crate::inventory::ItemStack::new(BlockType::Sunflower, 1),
-                Vec3::new(x as f32 + 0.5, y as f32 + 1.0, z as f32 + 0.5),
+                Vec3::new(block_center_x(x), y as f32 + 1.0, block_center_z(z)),
                 Vec3::ZERO,
             ));
         }
@@ -1591,7 +1598,7 @@ impl World {
                 self.set_block(cx, cy, cz, BlockType::Air);
                 self.dropped_items.push(crate::inventory::DroppedItem::new(
                     crate::inventory::ItemStack::new(BlockType::Cactus, 1),
-                    Vec3::new(cx as f32 + 0.5, cy as f32 + 0.5, cz as f32 + 0.5),
+                    Vec3::new(block_center_x(cx), block_center_y(cy), block_center_z(cz)),
                     Vec3::new(0.0, 0.5, 0.0),
                 ));
                 queue.push((cx, cy + 1, cz));
@@ -1654,39 +1661,54 @@ impl World {
     pub fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> RaycastResult {
         let dir = direction.normalize();
         let mut t = 0.0;
-        let mut ix = origin.x.floor() as i32;
-        let mut iy = origin.y.floor() as i32;
-        let mut iz = origin.z.floor() as i32;
+        let mut ix = world_to_block_x(origin.x);
+        let mut iy = world_to_block_y(origin.y);
+        let mut iz = world_to_block_z(origin.z);
         let step_x = dir.x.signum() as i32;
         let step_y = dir.y.signum() as i32;
         let step_z = dir.z.signum() as i32;
         let mut t_max_x = if dir.x != 0.0 {
-            ((ix as f32 + (step_x.max(0) as f32)) - origin.x) / dir.x
+            let boundary = if step_x > 0 {
+                block_origin_x(ix + 1)
+            } else {
+                block_origin_x(ix)
+            };
+            (boundary - origin.x) / dir.x
         } else {
             f32::INFINITY
         };
         let mut t_max_y = if dir.y != 0.0 {
-            ((iy as f32 + (step_y.max(0) as f32)) - origin.y) / dir.y
+            let boundary = if step_y > 0 {
+                block_origin_y(iy + 1)
+            } else {
+                block_origin_y(iy)
+            };
+            (boundary - origin.y) / dir.y
         } else {
             f32::INFINITY
         };
         let mut t_max_z = if dir.z != 0.0 {
-            ((iz as f32 + (step_z.max(0) as f32)) - origin.z) / dir.z
+            let boundary = if step_z > 0 {
+                block_origin_z(iz + 1)
+            } else {
+                block_origin_z(iz)
+            };
+            (boundary - origin.z) / dir.z
         } else {
             f32::INFINITY
         };
         let t_delta_x = if dir.x != 0.0 {
-            (1.0 / dir.x).abs()
+            (BLOCK_SIZE_X / dir.x).abs()
         } else {
             f32::INFINITY
         };
         let t_delta_y = if dir.y != 0.0 {
-            (1.0 / dir.y).abs()
+            (BLOCK_SIZE_Y / dir.y).abs()
         } else {
             f32::INFINITY
         };
         let t_delta_z = if dir.z != 0.0 {
-            (1.0 / dir.z).abs()
+            (BLOCK_SIZE_Z / dir.z).abs()
         } else {
             f32::INFINITY
         };
@@ -1887,8 +1909,8 @@ impl World {
 
     pub fn update(&mut self, player_pos: Vec3, _time: f32, held: BlockType) -> u32 {
         self.advance_day_clock(_time);
-        let pcx = (player_pos.x / CHUNK_WIDTH as f32).floor() as i32;
-        let pcz = (player_pos.z / CHUNK_DEPTH as f32).floor() as i32;
+        let pcx = chunk_of_world_x(player_pos.x);
+        let pcz = chunk_of_world_z(player_pos.z);
 
         // --- Multithreaded Initial World Loading & Spiral Generation ---
         if self.is_loading {
@@ -1916,9 +1938,8 @@ impl World {
         //    Results for chunks that scrolled out of the pool are dropped.
         if self.meshing_in_flight > 0 {
             let upload_start = crate::platform::Instant::now();
-            while (self.is_loading || upload_start.elapsed().as_secs_f32() < 0.002)
-                && let Ok(result) = self.mesh_result_rx.try_recv()
-            {
+            let mut uploads = 0usize;
+            while let Ok(result) = self.mesh_result_rx.try_recv() {
                 self.meshing_in_flight -= 1;
                 let has_atlas = self.atlas.is_some();
                 let relit = if let Some(chunk) = self.get_chunk_mut(result.x, result.z)
@@ -1942,6 +1963,11 @@ impl World {
                 if relit {
                     self.sync_gpu_chunk(result.x, result.z, pcx, pcz);
                 }
+                uploads += 1;
+                let loading_full = self.is_loading && uploads >= LOADING_MESH_UPLOADS_PER_UPDATE;
+                if loading_full || upload_start.elapsed().as_secs_f32() >= 0.002 {
+                    break;
+                }
             }
         }
 
@@ -1953,8 +1979,8 @@ impl World {
                     && chunk.dirty
                     && !chunk.meshing_in_progress
                 {
-                    let dx = chunk.x as f32 * CHUNK_WIDTH as f32 + 8.0 - player_pos.x;
-                    let dz = chunk.z as f32 * CHUNK_DEPTH as f32 + 8.0 - player_pos.z;
+                    let dx = chunk.x as f32 * CHUNK_SPAN_X + CHUNK_SPAN_X * 0.5 - player_pos.x;
+                    let dz = chunk.z as f32 * CHUNK_SPAN_Z + CHUNK_SPAN_Z * 0.5 - player_pos.z;
                     let dist_sq = dx * dx + dz * dz;
                     dirty_indices.push((i, dist_sq));
                 }
@@ -1966,6 +1992,9 @@ impl World {
             let dispatch_start = crate::platform::Instant::now();
             let mut dispatches_this_frame = 0;
             for (index, _) in dirty_indices {
+                if self.is_loading && self.meshing_in_flight >= MAX_LOADING_MESH_IN_FLIGHT {
+                    break;
+                }
                 let (cx, cz) = match &self.chunks[index] {
                     Some(chunk) => (chunk.x, chunk.z),
                     None => continue,
@@ -2011,7 +2040,7 @@ impl World {
                     16
                 };
                 if dispatches_this_frame >= max_dispatches
-                    || (!self.is_loading && dispatch_start.elapsed().as_secs_f32() >= 0.002)
+                    || dispatch_start.elapsed().as_secs_f32() >= 0.002
                 {
                     break;
                 }
@@ -2136,9 +2165,9 @@ impl World {
         for (pos, power) in dets {
             crate::explosion::explode(
                 self,
-                pos.x.floor() as i32,
-                pos.y.floor() as i32,
-                pos.z.floor() as i32,
+                world_to_block_x(pos.x),
+                world_to_block_y(pos.y),
+                world_to_block_z(pos.z),
                 power,
                 player_pos,
             );
@@ -2184,9 +2213,9 @@ impl World {
                     let vel = self.xp_orbs[x_idx].velocity * 0.95;
                     self.xp_orbs[x_idx].velocity = vel;
                     let next_pos = orb_pos + vel * _time;
-                    let bx = next_pos.x.floor() as i32;
-                    let by = next_pos.y.floor() as i32;
-                    let bz = next_pos.z.floor() as i32;
+                    let bx = world_to_block_x(next_pos.x);
+                    let by = world_to_block_y(next_pos.y);
+                    let bz = world_to_block_z(next_pos.z);
                     if self.get_block(bx, by, bz).is_solid() {
                         self.xp_orbs[x_idx].velocity = Vec3::ZERO;
                     } else {
@@ -2207,16 +2236,16 @@ impl World {
         for drop in &mut dropped_items {
             if self
                 .get_chunk(
-                    (drop.position.x.floor() as i32).div_euclid(16),
-                    (drop.position.z.floor() as i32).div_euclid(16),
+                    chunk_of_world_x(drop.position.x),
+                    chunk_of_world_z(drop.position.z),
                 )
                 .is_some()
             {
                 drop.tick(_time, |pos| {
                     self.get_block(
-                        pos.x.floor() as i32,
-                        pos.y.floor() as i32,
-                        pos.z.floor() as i32,
+                        world_to_block_x(pos.x),
+                        world_to_block_y(pos.y),
+                        world_to_block_z(pos.z),
                     )
                     .is_solid()
                 });
@@ -2224,12 +2253,12 @@ impl World {
         }
         dropped_items.retain(|drop| {
             let p = drop.position;
-            let min_x = (p.x - 0.25).floor() as i32;
-            let max_x = (p.x + 0.25).floor() as i32;
-            let min_y = (p.y - 0.2).floor() as i32;
-            let max_y = (p.y + 0.35).floor() as i32;
-            let min_z = (p.z - 0.25).floor() as i32;
-            let max_z = (p.z + 0.25).floor() as i32;
+            let min_x = world_to_block_x(p.x - 0.25);
+            let max_x = world_to_block_x(p.x + 0.25);
+            let min_y = world_to_block_y(p.y - 0.2);
+            let max_y = world_to_block_y(p.y + 0.35);
+            let min_z = world_to_block_z(p.z - 0.25);
+            let max_z = world_to_block_z(p.z + 0.25);
             for bx in min_x..=max_x {
                 for by in min_y..=max_y {
                     for bz in min_z..=max_z {
@@ -2252,14 +2281,14 @@ impl World {
         self.update_fire(_time);
         self.update_crops(_time);
         let standing_in_fire = self.get_block(
-            player_pos.x.floor() as i32,
-            player_pos.y.floor() as i32,
-            player_pos.z.floor() as i32,
+            world_to_block_x(player_pos.x),
+            world_to_block_y(player_pos.y),
+            world_to_block_z(player_pos.z),
         ) == BlockType::Fire
             || self.get_block(
-                player_pos.x.floor() as i32,
-                (player_pos.y + 1.0).floor() as i32,
-                player_pos.z.floor() as i32,
+                world_to_block_x(player_pos.x),
+                world_to_block_y(player_pos.y + 1.0),
+                world_to_block_z(player_pos.z),
             ) == BlockType::Fire;
         if standing_in_fire {
             self.burn_timer += _time;
@@ -2285,9 +2314,9 @@ impl World {
         };
         self.spawned_villages.insert((cx, cz));
         let home = Vec3::new(
-            village.center_x as f32 + 0.5,
+            block_center_x(village.center_x),
             (village.base_y + 1) as f32,
-            village.center_z as f32 + 0.5,
+            block_center_z(village.center_z),
         );
         for (i, pos) in village.villager_spawns().into_iter().enumerate() {
             if self.mobs.len() >= MOB_CAP {
@@ -2313,7 +2342,9 @@ impl World {
     }
 
     fn solid_at(&self, x: f32, y: f32, z: f32) -> bool {
-        let (ix, iy, iz) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+        let ix = world_to_block_x(x);
+        let iy = world_to_block_y(y);
+        let iz = world_to_block_z(z);
         // Unloaded chunks read as Air from get_block; treat them as solid
         // so mobs can't wander into ungenerated terrain and freeze there.
         let cx = ix.div_euclid(CHUNK_WIDTH as i32);
@@ -2323,13 +2354,13 @@ impl World {
         }
         let b = self.get_block(ix, iy, iz);
         if b == BlockType::Cactus {
-            let lx = x - ix as f32;
-            let lz = z - iz as f32;
+            let lx = (x - block_origin_x(ix)) / BLOCK_SIZE_X;
+            let lz = (z - block_origin_z(iz)) / BLOCK_SIZE_Z;
             return (1.0 / 16.0..=15.0 / 16.0).contains(&lx)
                 && (1.0 / 16.0..=15.0 / 16.0).contains(&lz);
         }
         if matches!(b, BlockType::OakDoor | BlockType::IronDoor) {
-            let lz = z - iz as f32;
+            let lz = (z - block_origin_z(iz)) / BLOCK_SIZE_Z;
             return (0.0..=3.0 / 16.0).contains(&lz);
         }
         b.is_solid()
@@ -2339,23 +2370,24 @@ impl World {
     fn mob_box_blocked(&self, pos: Vec3, hw: f32, height: f32) -> bool {
         // Cover every voxel the box overlaps; corner sampling misses the
         // middle column when a wide mob straddles three columns.
-        let min_x = (pos.x - hw).floor() as i32;
-        let max_x = (pos.x + hw).floor() as i32;
-        let min_y = (pos.y + 0.05).floor() as i32;
-        let max_y = (pos.y + height - 0.1).floor() as i32;
-        let min_z = (pos.z - hw).floor() as i32;
-        let max_z = (pos.z + hw).floor() as i32;
+        let min_x = world_to_block_x(pos.x - hw);
+        let max_x = world_to_block_x(pos.x + hw);
+        let min_y = world_to_block_y(pos.y + 0.05);
+        let max_y = world_to_block_y(pos.y + height - 0.1);
+        let min_z = world_to_block_z(pos.z - hw);
+        let max_z = world_to_block_z(pos.z + hw);
         for x in min_x..=max_x {
             for y in min_y..=max_y {
                 for z in min_z..=max_z {
                     let b = self.get_block(x, y, z);
                     if matches!(b, BlockType::OakDoor | BlockType::IronDoor) {
-                        let door_min_z = z as f32;
-                        let door_max_z = z as f32 + 3.0 / 16.0;
+                        let door_min_z = block_origin_z(z);
+                        let door_max_z = door_min_z + BLOCK_SIZE_Z * 3.0 / 16.0;
                         if pos.z + hw > door_min_z && pos.z - hw < door_max_z {
                             return true;
                         }
-                    } else if self.solid_at(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) {
+                    } else if self.solid_at(block_center_x(x), block_center_y(y), block_center_z(z))
+                    {
                         return true;
                     }
                 }
@@ -2366,24 +2398,26 @@ impl World {
 
     fn block_at_feet(&self, pos: Vec3) -> BlockType {
         self.get_block(
-            pos.x.floor() as i32,
-            pos.y.floor() as i32,
-            pos.z.floor() as i32,
+            world_to_block_x(pos.x),
+            world_to_block_y(pos.y),
+            world_to_block_z(pos.z),
         )
     }
 
     fn animal_in_water(&self, mob: &Mob) -> bool {
         let p = mob.position + Vec3::Y * (mob.height() * 0.5);
-        let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        let x = world_to_block_x(p.x);
+        let y = world_to_block_y(p.y);
+        let z = world_to_block_z(p.z);
         self.get_block(x, y, z) == BlockType::Water
             && p.y < y as f32 + crate::chunk::water_render_height(self.get_liquid_level(x, y, z))
     }
 
     fn grass_under(&self, pos: Vec3) -> bool {
         let b = self.get_block(
-            pos.x.floor() as i32,
-            (pos.y - 0.05).floor() as i32,
-            pos.z.floor() as i32,
+            world_to_block_x(pos.x),
+            world_to_block_y(pos.y - 0.05),
+            world_to_block_z(pos.z),
         );
         matches!(b, BlockType::Grass | BlockType::SnowyGrass)
     }
@@ -2399,9 +2433,9 @@ impl World {
             let x = from.x + dx as f32;
             let z = from.z + dz as f32;
             let gy = from.y + dy as f32;
-            let ix = x.floor() as i32;
-            let iz = z.floor() as i32;
-            let iy = gy.floor() as i32;
+            let ix = world_to_block_x(x);
+            let iz = world_to_block_z(z);
+            let iy = world_to_block_y(gy);
             let below = self.get_block(ix, iy - 1, iz);
             let feet = self.get_block(ix, iy, iz);
             let head = self.get_block(ix, iy + 1, iz);
@@ -2410,7 +2444,7 @@ impl World {
                 && !feet.is_solid()
                 && !head.is_solid()
             {
-                return Some((ix as f32 + 0.5, iz as f32 + 0.5));
+                return Some((block_center_x(ix), block_center_z(iz)));
             }
         }
         None
@@ -2504,9 +2538,9 @@ impl World {
                 mob.animal.eat_time -= dt;
                 mob.walk_speed = 0.0;
                 if mob.animal.eat_time <= 0.0 && self.grass_under(mob.position) {
-                    let x = mob.position.x.floor() as i32;
-                    let y = (mob.position.y - 0.05).floor() as i32;
-                    let z = mob.position.z.floor() as i32;
+                    let x = world_to_block_x(mob.position.x);
+                    let y = world_to_block_y(mob.position.y - 0.05);
+                    let z = world_to_block_z(mob.position.z);
                     self.set_block(x, y, z, BlockType::Dirt);
                 }
                 return;
@@ -2653,10 +2687,7 @@ impl World {
             if mob.position.distance_squared(player_pos) <= max_distance * max_distance {
                 return true;
             }
-            let home_chunk = (
-                (mob.home.x / CHUNK_WIDTH as f32).floor() as i32,
-                (mob.home.z / CHUNK_DEPTH as f32).floor() as i32,
-            );
+            let home_chunk = (chunk_of_world_x(mob.home.x), chunk_of_world_z(mob.home.z));
             if matches!(mob.kind, MobKind::Villager | MobKind::Golem) {
                 despawned_villages.push(home_chunk);
             } else {
@@ -2707,8 +2738,8 @@ impl World {
             mob.animation.update(dt);
             // Freeze mobs whose chunk is unloaded so they don't fall
             // through ungenerated terrain.
-            let mcx = (mob.position.x / CHUNK_WIDTH as f32).floor() as i32;
-            let mcz = (mob.position.z / CHUNK_DEPTH as f32).floor() as i32;
+            let mcx = chunk_of_world_x(mob.position.x);
+            let mcz = chunk_of_world_z(mob.position.z);
             if self.get_chunk(mcx, mcz).is_none() {
                 continue;
             }
@@ -2995,12 +3026,12 @@ impl World {
             if mob.health > 0.0 && mob.animation.hurt_remaining <= 0.0 {
                 let hw = mob.half_width();
                 let height = mob.height();
-                let min_x = (mob.position.x - hw - 0.05).floor() as i32;
-                let max_x = (mob.position.x + hw + 0.05).floor() as i32;
-                let min_y = (mob.position.y - 0.05).floor() as i32;
-                let max_y = (mob.position.y + height).floor() as i32;
-                let min_z = (mob.position.z - hw - 0.05).floor() as i32;
-                let max_z = (mob.position.z + hw + 0.05).floor() as i32;
+                let min_x = world_to_block_x(mob.position.x - hw - 0.05);
+                let max_x = world_to_block_x(mob.position.x + hw + 0.05);
+                let min_y = world_to_block_y(mob.position.y - 0.05);
+                let max_y = world_to_block_y(mob.position.y + height);
+                let min_z = world_to_block_z(mob.position.z - hw - 0.05);
+                let max_z = world_to_block_z(mob.position.z + hw + 0.05);
                 let mut touches_cactus = false;
                 'mob_cactus: for bx in min_x..=max_x {
                     for by in min_y..=max_y {
@@ -3020,12 +3051,12 @@ impl World {
             let touches_water = {
                 let p = mob.position;
                 let hw = mob.half_width();
-                let min_x = (p.x - hw).floor() as i32;
-                let max_x = (p.x + hw).floor() as i32;
-                let min_y = (p.y - 0.1).floor() as i32;
-                let max_y = (p.y + mob.height()).floor() as i32;
-                let min_z = (p.z - hw).floor() as i32;
-                let max_z = (p.z + hw).floor() as i32;
+                let min_x = world_to_block_x(p.x - hw);
+                let max_x = world_to_block_x(p.x + hw);
+                let min_y = world_to_block_y(p.y - 0.1);
+                let max_y = world_to_block_y(p.y + mob.height());
+                let min_z = world_to_block_z(p.z - hw);
+                let max_z = world_to_block_z(p.z + hw);
                 let mut found = false;
                 'w: for bx in min_x..=max_x {
                     for by in min_y..=max_y {
@@ -3046,9 +3077,9 @@ impl World {
                 MobKind::Zombie | MobKind::ZombieVillager | MobKind::Drowned
             );
             if mob.health > 0.0 && is_undead_sun_vulnerable && self.day_time < 600.0 {
-                let bx = mob.position.x.floor() as i32;
-                let bz = mob.position.z.floor() as i32;
-                let head_y = (mob.position.y + mob.height()).floor() as i32;
+                let bx = world_to_block_x(mob.position.x);
+                let bz = world_to_block_z(mob.position.z);
+                let head_y = world_to_block_y(mob.position.y + mob.height());
                 let under_open_sky =
                     (head_y..CHUNK_HEIGHT as i32).all(|y| !self.get_block(bx, y, bz).is_solid());
                 if !touches_water && under_open_sky {
@@ -3161,8 +3192,8 @@ impl World {
         self.separate_mobs(&mut mobs);
         self.mobs = mobs;
         let player_chunk = (
-            (player_pos.x / CHUNK_WIDTH as f32).floor() as i32,
-            (player_pos.z / CHUNK_DEPTH as f32).floor() as i32,
+            chunk_of_world_x(player_pos.x),
+            chunk_of_world_z(player_pos.z),
         );
         self.try_spawn_natural_mobs(player_chunk.0, player_chunk.1);
         self.night_spawn_timer -= dt;
@@ -3174,8 +3205,8 @@ impl World {
             if self.mobs.len() < MOB_CAP && self.mobs.iter().filter(|m| m.is_hostile()).count() < 16
             {
                 let angle = rand::random::<f32>() * std::f32::consts::TAU;
-                let x = (player_pos.x + angle.cos() * 28.0).floor() as i32;
-                let z = (player_pos.z + angle.sin() * 28.0).floor() as i32;
+                let x = world_to_block_x(player_pos.x + angle.cos() * 28.0);
+                let z = world_to_block_z(player_pos.z + angle.sin() * 28.0);
                 self.spawn_surface_mob(x, z, rand::random(), true);
             }
         }
@@ -3203,8 +3234,8 @@ impl World {
             if mob.position.distance_squared(player_pos) > 64.0 * 64.0 {
                 continue;
             }
-            let cx = (mob.position.x / CHUNK_WIDTH as f32).floor() as i32;
-            let cz = (mob.position.z / CHUNK_DEPTH as f32).floor() as i32;
+            let cx = chunk_of_world_x(mob.position.x);
+            let cz = chunk_of_world_z(mob.position.z);
             if self.get_chunk(cx, cz).is_none() {
                 continue;
             }
@@ -3388,7 +3419,7 @@ impl World {
             if self.get_block(x, y, z) == BlockType::TNT {
                 self.set_block(x, y, z, BlockType::Air);
                 self.explosives.push(crate::block::ActiveExplosive {
-                    position: Vec3::new(x as f32, y as f32, z as f32),
+                    position: Vec3::new(block_origin_x(x), block_origin_y(y), block_origin_z(z)),
                     velocity: Vec3::new(0.0, 1.2, 0.0),
                     fuse: 4.0,
                     initial_fuse: 4.0,
@@ -4215,15 +4246,11 @@ impl World {
         for (i, chunk_opt) in self.chunks.iter().enumerate() {
             if let Some(chunk) = chunk_opt {
                 let min = Vec3::new(
-                    chunk.x as f32 * CHUNK_WIDTH as f32,
+                    chunk.x as f32 * CHUNK_SPAN_X,
                     0.0,
-                    chunk.z as f32 * CHUNK_DEPTH as f32,
+                    chunk.z as f32 * CHUNK_SPAN_Z,
                 );
-                let max = Vec3::new(
-                    min.x + CHUNK_WIDTH as f32,
-                    CHUNK_HEIGHT as f32,
-                    min.z + CHUNK_DEPTH as f32,
-                );
+                let max = Vec3::new(min.x + CHUNK_SPAN_X, CHUNK_SPAN_Y, min.z + CHUNK_SPAN_Z);
                 if frustum.is_box_visible(min, max) {
                     self.visible_chunks.push(i);
                 }
@@ -4234,9 +4261,9 @@ impl World {
             let distance = |index: usize| {
                 let chunk = self.chunks[index].as_ref().unwrap();
                 let center = Vec3::new(
-                    chunk.x as f32 * CHUNK_WIDTH as f32 + CHUNK_WIDTH as f32 * 0.5,
+                    chunk.x as f32 * CHUNK_SPAN_X + CHUNK_SPAN_X * 0.5,
                     camera.y,
-                    chunk.z as f32 * CHUNK_DEPTH as f32 + CHUNK_DEPTH as f32 * 0.5,
+                    chunk.z as f32 * CHUNK_SPAN_Z + CHUNK_SPAN_Z * 0.5,
                 );
                 center.distance_squared(camera)
             };
@@ -4272,11 +4299,11 @@ impl World {
         }
         for chunk in self.chunks.iter().flatten() {
             let min = Vec3::new(
-                chunk.x as f32 * CHUNK_WIDTH as f32,
+                chunk.x as f32 * CHUNK_SPAN_X,
                 0.0,
-                chunk.z as f32 * CHUNK_DEPTH as f32,
+                chunk.z as f32 * CHUNK_SPAN_Z,
             );
-            let max = min + Vec3::new(CHUNK_WIDTH as f32, CHUNK_HEIGHT as f32, CHUNK_DEPTH as f32);
+            let max = min + Vec3::new(CHUNK_SPAN_X, CHUNK_SPAN_Y, CHUNK_SPAN_Z);
             if frustum.is_box_visible(min, max)
                 && let Some(mesh) = &chunk.mesh_opaque
             {
@@ -4431,6 +4458,10 @@ pub mod combat_smoke {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{
+        block_center_x, block_center_y, block_center_z, world_to_block_x, world_to_block_y,
+        world_to_block_z,
+    };
 
     #[test]
     fn sunflowers_remove_both_halves_when_broken_or_unsupported() {
@@ -4764,7 +4795,7 @@ mod tests {
         // Item landing on/touching cactus
         world.dropped_items.push(crate::inventory::DroppedItem::new(
             crate::inventory::ItemStack::new(BlockType::Diamond, 5),
-            Vec3::new(10.5, 64.5, 10.5),
+            Vec3::new(block_center_x(10), block_center_y(64), block_center_z(10)),
             Vec3::ZERO,
         ));
         // Item safely away from cactus
@@ -4795,7 +4826,7 @@ mod tests {
         // Spawn a zombie touching the cactus
         let zombie = crate::mob::Mob::new(
             crate::mob::MobKind::Zombie,
-            Vec3::new(10.5, 64.0, 10.5),
+            Vec3::new(block_center_x(10), 64.0, block_center_z(10)),
             Vec3::ZERO,
             0,
         );
@@ -4918,14 +4949,19 @@ mod tests {
         let idx = world.get_pool_index(0, 0);
         world.chunks[idx] = Some(Box::new(crate::chunk::Chunk::new(0, 0, 42)));
 
-        for x in 8..=12 {
-            for z in 8..=12 {
+        let min_x = world_to_block_x(10.25 - 0.7);
+        let max_x = world_to_block_x(10.25 + 0.7);
+        let min_z = world_to_block_z(10.0 - 0.7);
+        let max_z = world_to_block_z(10.0 + 0.7);
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
                 world.set_block(x, 63, z, BlockType::Stone);
             }
         }
+        let wall_x = world_to_block_x(11.0);
         for y in 64..=66 {
-            for z in 8..=12 {
-                world.set_block(11, y, z, BlockType::Stone);
+            for z in min_z..=max_z {
+                world.set_block(wall_x, y, z, BlockType::Stone);
             }
         }
 
@@ -4996,11 +5032,21 @@ mod tests {
         world.set_block(5, 64, 5, BlockType::OakDoor);
         world.set_block(6, 64, 5, BlockType::IronDoor);
 
-        assert!(world.solid_at(5.5, 64.5, 5.1));
-        assert!(world.solid_at(6.5, 64.5, 5.1));
-
-        assert!(!world.solid_at(5.5, 64.5, 5.5));
-        assert!(!world.solid_at(6.5, 64.5, 5.5));
+        let door_face = |block: i32, along: f32| {
+            (
+                crate::chunk::block_center_x(block),
+                64.5,
+                crate::chunk::block_origin_z(5) + crate::chunk::BLOCK_SIZE_Z * along,
+            )
+        };
+        let (x, y, z) = door_face(5, 0.1);
+        assert!(world.solid_at(x, y, z));
+        let (x, y, z) = door_face(6, 0.1);
+        assert!(world.solid_at(x, y, z));
+        let (x, y, z) = door_face(5, 0.5);
+        assert!(!world.solid_at(x, y, z));
+        let (x, y, z) = door_face(6, 0.5);
+        assert!(!world.solid_at(x, y, z));
     }
 
     #[test]
@@ -5025,8 +5071,8 @@ mod tests {
         let mut world = World::simulation(42);
         let idx = world.get_pool_index(0, 0);
         world.chunks[idx] = Some(Box::new(crate::chunk::Chunk::new(0, 0, 42)));
-        for x in 0..16 {
-            for z in 0..16 {
+        for x in 0..32 {
+            for z in 0..32 {
                 world.set_block(x, 63, z, BlockType::Stone);
             }
         }
@@ -5073,8 +5119,8 @@ mod tests {
         let mut world = World::simulation(42);
         let idx = world.get_pool_index(0, 0);
         world.chunks[idx] = Some(Box::new(crate::chunk::Chunk::new(0, 0, 42)));
-        for x in 0..16 {
-            for z in 0..16 {
+        for x in 0..32 {
+            for z in 0..32 {
                 world.set_block(x, 63, z, BlockType::Stone);
             }
         }
@@ -5118,10 +5164,12 @@ mod tests {
         assert!(world.arrows.is_empty(), "Arrow was removed upon dodge");
 
         // Enderman water damage & teleport
-        let cur = world.mobs[0].position.floor().as_ivec3();
+        let cur_x = world_to_block_x(world.mobs[0].position.x);
+        let cur_y = world_to_block_y(world.mobs[0].position.y);
+        let cur_z = world_to_block_z(world.mobs[0].position.z);
         for dx in -1..=1 {
             for dz in -1..=1 {
-                world.set_block(cur.x + dx, cur.y, cur.z + dz, BlockType::Water);
+                world.set_block(cur_x + dx, cur_y, cur_z + dz, BlockType::Water);
             }
         }
         world.mobs[0].sun_burn_timer = 0.95;
@@ -5137,8 +5185,8 @@ mod tests {
         let mut world = World::simulation(42);
         let idx = world.get_pool_index(0, 0);
         world.chunks[idx] = Some(Box::new(crate::chunk::Chunk::new(0, 0, 42)));
-        for x in 0..16 {
-            for z in 0..16 {
+        for x in 0..32 {
+            for z in 0..32 {
                 world.set_block(x, 63, z, BlockType::Stone);
             }
         }
@@ -5175,9 +5223,12 @@ mod tests {
 
         // In water during daytime: does not burn
         world.day_time = 100.0;
+        let feet_x = world_to_block_x(world.mobs[0].position.x);
+        let feet_y = world_to_block_y(world.mobs[0].position.y);
+        let feet_z = world_to_block_z(world.mobs[0].position.z);
         for dx in -1..=1 {
             for dz in -1..=1 {
-                world.set_block(8 + dx, 64, 8 + dz, BlockType::Water);
+                world.set_block(feet_x + dx, feet_y, feet_z + dz, BlockType::Water);
             }
         }
         world.mobs[0].sun_burn_timer = 0.95;

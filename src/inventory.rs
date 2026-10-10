@@ -285,7 +285,11 @@ pub fn prime_tnt(world: &mut World, x: i32, y: i32, z: i32) {
     let vx = (rng.random_range(0.0..1.0) * 0.04 - 0.02) * 20.0;
     let vz = (rng.random_range(0.0..1.0) * 0.04 - 0.02) * 20.0;
     world.explosives.push(crate::block::ActiveExplosive {
-        position: Vec3::new(x as f32, y as f32, z as f32),
+        position: Vec3::new(
+            crate::chunk::block_origin_x(x),
+            crate::chunk::block_origin_y(y),
+            crate::chunk::block_origin_z(z),
+        ),
         velocity: Vec3::new(vx, 1.2, vz),
         fuse: 4.0,
         initial_fuse: 4.0,
@@ -506,9 +510,9 @@ pub fn try_place_block_with_lock(
                 let r3 = (rand::random::<f32>() - 0.5) * 0.6;
                 world.particles.push(crate::block::Particle {
                     position: Vec3::new(
-                        cx as f32 + 0.5 + r1,
+                        crate::chunk::block_center_x(cx) + r1,
                         cy as f32 + 0.2 + r2,
-                        cz as f32 + 0.5 + r3,
+                        crate::chunk::block_center_z(cz) + r3,
                     ),
                     velocity: Vec3::new(r1 * 0.5, 0.4 + r2 * 0.5, r3 * 0.5),
                     color: glam::Vec4::new(0.2, 0.8, 0.2, 1.0),
@@ -876,6 +880,7 @@ pub fn ct_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{block_center_x, block_center_z};
 
     #[test]
     fn closing_crafting_table_cannot_duplicate_the_preview() {
@@ -1112,7 +1117,7 @@ mod tests {
         let mut inv = [None::<ItemStack>; INVENTORY_SLOT_COUNT];
         inv[0] = Some(ItemStack::new(BlockType::WheatSeeds, 2));
 
-        let eye_pos = Vec3::new(0.5, 62.0, 0.5);
+        let eye_pos = Vec3::new(block_center_x(0), 62.0, block_center_z(0));
         let look_dir = Vec3::new(0.0, -1.0, 0.0);
         let mut lock = None;
 
@@ -1140,7 +1145,7 @@ mod tests {
             &mut world,
             &mut inv,
             0,
-            Vec3::new(2.5, 62.0, 2.5),
+            Vec3::new(block_center_x(2), 62.0, block_center_z(2)),
             look_dir,
             &player,
             &mut lock,
@@ -1165,7 +1170,7 @@ mod tests {
             &mut world,
             &mut inv,
             0,
-            Vec3::new(10.5, 62.0, 10.5),
+            Vec3::new(block_center_x(10), 62.0, block_center_z(10)),
             Vec3::new(0.0, -1.0, 0.0),
             &player,
             &mut lock,
@@ -1180,7 +1185,7 @@ mod tests {
             &mut world,
             &mut inv,
             0,
-            Vec3::new(10.5, 63.0, 10.5),
+            Vec3::new(block_center_x(10), 63.0, block_center_z(10)),
             Vec3::new(0.0, -1.0, 0.0),
             &player,
             &mut lock,
@@ -1196,7 +1201,7 @@ mod tests {
             &mut world,
             &mut inv,
             0,
-            Vec3::new(20.5, 62.0, 20.5),
+            Vec3::new(block_center_x(20), 62.0, block_center_z(20)),
             Vec3::new(0.0, -1.0, 0.0),
             &player,
             &mut lock,
@@ -1213,7 +1218,7 @@ mod tests {
             &mut world,
             &mut inv,
             0,
-            Vec3::new(30.5, 62.0, 30.5),
+            Vec3::new(block_center_x(30), 62.0, block_center_z(30)),
             Vec3::new(0.0, -1.0, 0.0),
             &player,
             &mut lock,

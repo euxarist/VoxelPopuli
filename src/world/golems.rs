@@ -103,6 +103,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::chunk::{world_to_block_x, world_to_block_z};
 
     fn arena() -> World {
         let mut world = World::simulation(42);
@@ -307,8 +308,10 @@ mod tests {
         spawn(&mut world, MobKind::Golem, 8.0);
         spawn(&mut world, MobKind::Zombie, 10.5);
         world.mobs[0].health = 60.0;
+        let wall_x = world_to_block_x(9.0) as usize;
+        let wall_z = world_to_block_z(8.0) as usize;
         for y in 61..65 {
-            world.get_chunk_mut(0, 0).unwrap().blocks[9][y][8] = BlockType::Stone;
+            world.get_chunk_mut(0, 0).unwrap().blocks[wall_x][y][wall_z] = BlockType::Stone;
         }
         assert!(!world.try_feed_animal(
             Vec3::new(10.0, 62.45, 8.0),
@@ -324,7 +327,14 @@ mod tests {
     fn golem_explosion_damage_does_not_knock_back_or_provoke() {
         let mut world = arena();
         spawn(&mut world, MobKind::Golem, 8.0);
-        crate::explosion::explode(&mut world, 5, 62, 8, 2, Vec3::ZERO);
+        crate::explosion::explode(
+            &mut world,
+            world_to_block_x(5.5),
+            62,
+            world_to_block_z(8.5),
+            2,
+            Vec3::ZERO,
+        );
         assert!(world.mobs[0].health < 100.0);
         assert_eq!(world.mobs[0].velocity, Vec3::ZERO);
         assert!(world.mobs[0].grounded);

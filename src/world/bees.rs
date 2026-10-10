@@ -1,12 +1,24 @@
 use super::*;
 use crate::bee::{BlockPos, center, is_flower, is_hive};
+use crate::chunk::{
+    CHUNK_DEPTH, CHUNK_WIDTH, block_center_x, block_center_z, world_to_block_x, world_to_block_y,
+    world_to_block_z,
+};
 
 impl World {
     fn bee_path(&self, mob: &Mob, destination: Vec3) -> Vec<Vec3> {
         use std::cmp::Reverse;
         use std::collections::{BinaryHeap, HashMap};
-        let start = mob.position.floor().as_ivec3();
-        let end = destination.floor().as_ivec3();
+        let start = glam::IVec3::new(
+            world_to_block_x(mob.position.x),
+            world_to_block_y(mob.position.y),
+            world_to_block_z(mob.position.z),
+        );
+        let end = glam::IVec3::new(
+            world_to_block_x(destination.x),
+            world_to_block_y(destination.y),
+            world_to_block_z(destination.z),
+        );
         let key = |p: glam::IVec3| (p.x, p.y, p.z);
         let mut open = BinaryHeap::new();
         let mut costs = HashMap::new();
@@ -40,7 +52,10 @@ impl World {
                 -glam::IVec3::Z,
             ] {
                 let next = p3 + delta;
-                if (next - start).abs().max_element() > 24
+                let reach = (next - start).abs();
+                if reach.x > 48
+                    || reach.y > 24
+                    || reach.z > 48
                     || !self.bee_clear(mob, center(key(next)) + Vec3::Y * 0.2)
                 {
                     continue;
@@ -66,12 +81,18 @@ impl World {
             return false;
         }
         let r = mob.half_width();
-        for x in (p.x - r).floor() as i32..=(p.x + r).floor() as i32 {
-            for z in (p.z - r).floor() as i32..=(p.z + r).floor() as i32 {
-                if self.get_chunk(x.div_euclid(16), z.div_euclid(16)).is_none() {
+        for x in world_to_block_x(p.x - r)..=world_to_block_x(p.x + r) {
+            for z in world_to_block_z(p.z - r)..=world_to_block_z(p.z + r) {
+                if self
+                    .get_chunk(
+                        x.div_euclid(CHUNK_WIDTH as i32),
+                        z.div_euclid(CHUNK_DEPTH as i32),
+                    )
+                    .is_none()
+                {
                     return false;
                 }
-                for y in p.y.floor() as i32..=(p.y + mob.height()).floor() as i32 {
+                for y in world_to_block_y(p.y)..=world_to_block_y(p.y + mob.height()) {
                     let b = self.get_block(x, y, z);
                     if b.is_solid()
                         || matches!(
@@ -100,10 +121,11 @@ impl World {
 
     fn bee_hover_goal(&self, mob: &mut Mob) -> Option<Vec3> {
         for _ in 0..24 {
-            let x = (mob.position.x + (mob.bee.random(mob.id) * 2.0 - 1.0) * 8.0).floor() as i32;
-            let z = (mob.position.z + (mob.bee.random(mob.id) * 2.0 - 1.0) * 8.0).floor() as i32;
-            let top = (mob.position.y as i32 + 7).min(CHUNK_HEIGHT as i32 - 2);
-            let bottom = (mob.position.y as i32 - 9).max(1);
+            let x = world_to_block_x(mob.position.x + (mob.bee.random(mob.id) * 2.0 - 1.0) * 8.0);
+            let z = world_to_block_z(mob.position.z + (mob.bee.random(mob.id) * 2.0 - 1.0) * 8.0);
+            let bee_y = world_to_block_y(mob.position.y);
+            let top = (bee_y + 7).min(CHUNK_HEIGHT as i32 - 2);
+            let bottom = (bee_y - 9).max(1);
             let height = 1.0 + mob.bee.random(mob.id) * 3.0;
             for y in (bottom..=top).rev() {
                 if !self.get_block(x, y, z).is_solid()
@@ -111,7 +133,11 @@ impl World {
                 {
                     continue;
                 }
-                let p = Vec3::new(x as f32 + 0.5, y as f32 + 1.0 + height, z as f32 + 0.5);
+                let p = Vec3::new(
+                    block_center_x(x),
+                    y as f32 + 1.0 + height,
+                    block_center_z(z),
+                );
                 if (p.y - mob.position.y).abs() <= 8.0
                     && p.distance_squared(mob.position) > 1.0
                     && mob
@@ -131,11 +157,15 @@ impl World {
     }
 
     fn bee_flower(&self, mob: &mut Mob) -> Option<BlockPos> {
-        let origin = mob.position.floor().as_ivec3();
+        let origin = glam::IVec3::new(
+            world_to_block_x(mob.position.x),
+            world_to_block_y(mob.position.y),
+            world_to_block_z(mob.position.z),
+        );
         let mut chosen = None;
         let mut count = 0;
-        for x in origin.x - 6..=origin.x + 6 {
-            for z in origin.z - 6..=origin.z + 6 {
+        for x in origin.x - 12..=origin.x + 12 {
+            for z in origin.z - 12..=origin.z + 12 {
                 for y in (origin.y - 4).max(1)..=(origin.y + 4).min(CHUNK_HEIGHT as i32 - 2) {
                     if is_flower(self.get_block(x, y, z))
                         && self.bee_clear(mob, center((x, y, z)) + Vec3::Y * 0.25)
@@ -222,8 +252,11 @@ impl World {
             }
         }
         if mob.bee.hive.is_some_and(|p| {
-            self.get_chunk(p.0.div_euclid(16), p.2.div_euclid(16))
-                .is_some()
+            self.get_chunk(
+                p.0.div_euclid(CHUNK_WIDTH as i32),
+                p.2.div_euclid(CHUNK_DEPTH as i32),
+            )
+            .is_some()
                 && !is_hive(self.get_block(p.0, p.1, p.2))
         }) {
             mob.bee.hive = None;
@@ -400,7 +433,11 @@ impl World {
             && mob.bee.crop_charges > 0
             && mob.bee.random(mob.id) < 1.0 - 0.97f32.powf(dt * 20.0)
         {
-            let p = mob.position.floor().as_ivec3();
+            let p = glam::IVec3::new(
+                world_to_block_x(mob.position.x),
+                world_to_block_y(mob.position.y),
+                world_to_block_z(mob.position.z),
+            );
             for y in (p.y - 2..=p.y).rev() {
                 let next = match self.get_block(p.x, y, p.z) {
                     BlockType::WheatStage0 => BlockType::WheatStage1,
@@ -486,6 +523,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{world_to_block_x, world_to_block_z};
 
     fn arena() -> World {
         let mut world = World::simulation(42);
@@ -550,10 +588,11 @@ mod tests {
         world.update_mobs(p, 0.1, BlockType::Air);
         assert!(world.mobs[0].bee.inside);
         world.day_time = 0.0;
-        world.set_block(8, 65, 9, BlockType::Stone);
+        let door = (world_to_block_x(p.x), world_to_block_z(p.z));
+        world.set_block(door.0, 65, door.1, BlockType::Stone);
         world.update_mobs(p, 0.1, BlockType::Air);
         assert!(world.mobs[0].bee.inside);
-        world.set_block(8, 65, 9, BlockType::Air);
+        world.set_block(door.0, 65, door.1, BlockType::Air);
         world.update_mobs(p, 0.1, BlockType::Air);
         assert!(!world.mobs[0].bee.inside);
     }
@@ -632,9 +671,11 @@ mod tests {
         let mut world = arena();
         let start = Vec3::new(3.5, 65.2, 8.5);
         let end = Vec3::new(10.5, 65.2, 8.5);
+        let wall = world_to_block_x(7.0);
         for y in 64..70 {
-            for z in 5..=10 {
-                world.set_block(7, y, z, BlockType::Stone);
+            for z in world_to_block_z(5.0)..world_to_block_z(11.0) {
+                world.set_block(wall, y, z, BlockType::Stone);
+                world.set_block(wall + 1, y, z, BlockType::Stone);
             }
         }
         let bee = Mob::new(MobKind::Bee, start, start, 0);
@@ -642,7 +683,12 @@ mod tests {
         let path = world.bee_path(&bee, end);
         assert!(!path.is_empty());
         assert!(path.iter().all(|p| world.bee_clear(&bee, *p)));
-        world.set_block(3, 65, 8, BlockType::Water);
+        world.set_block(
+            world_to_block_x(start.x),
+            65,
+            world_to_block_z(start.z),
+            BlockType::Water,
+        );
         assert!(!world.bee_clear(&bee, start));
     }
 

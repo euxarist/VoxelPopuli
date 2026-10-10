@@ -1,4 +1,8 @@
 use crate::block::{ActiveExplosive, BlockType, Particle};
+use crate::chunk::{
+    block_center_x, block_center_y, block_center_z, block_origin_x, block_origin_y, block_origin_z,
+    world_to_block_x, world_to_block_y, world_to_block_z,
+};
 use crate::world::World;
 use glam::Vec3;
 use rand::RngExt;
@@ -42,7 +46,7 @@ fn can_explosion_destroy(block: BlockType) -> bool {
 
 pub fn explode(world: &mut World, x: i32, y: i32, z: i32, blast_size: i32, player_pos: Vec3) {
     let mut rng = rand::rng();
-    let explosion_center = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+    let explosion_center = Vec3::new(block_center_x(x), block_center_y(y), block_center_z(z));
     let size = blast_size as f32;
 
     // 1. Raytracing Sphere Pass (Minecraft Vanilla 16x16x16 face sampling)
@@ -63,9 +67,9 @@ pub fn explode(world: &mut World, x: i32, y: i32, z: i32, blast_size: i32, playe
                     let mut current_pos = explosion_center;
 
                     while ray_power > 0.0 {
-                        let bx = current_pos.x.floor() as i32;
-                        let by = current_pos.y.floor() as i32;
-                        let bz = current_pos.z.floor() as i32;
+                        let bx = world_to_block_x(current_pos.x);
+                        let by = world_to_block_y(current_pos.y);
+                        let bz = world_to_block_z(current_pos.z);
 
                         let block = world.get_block(bx, by, bz);
                         if block != BlockType::Air {
@@ -98,7 +102,7 @@ pub fn explode(world: &mut World, x: i32, y: i32, z: i32, blast_size: i32, playe
             let speed = rng.random_range(2.5..6.0);
             let fuse = rng.random_range(0.5..1.5); // 10..30 ticks in MC
             newly_ignited_tnt.push(chain_ignited_tnt(
-                Vec3::new(bx as f32, by as f32, bz as f32),
+                Vec3::new(block_origin_x(bx), block_origin_y(by), block_origin_z(bz)),
                 explosion_center,
                 speed,
                 fuse,

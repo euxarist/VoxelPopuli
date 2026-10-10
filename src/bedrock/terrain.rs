@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     block::BlockType,
-    chunk::{CHUNK_HEIGHT, Chunk},
+    chunk::{CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, Chunk},
     java_compat::NbtTag,
 };
 use std::{collections::HashMap, io};
@@ -38,6 +38,53 @@ pub fn read_chunk(
 
 pub struct ChunkRecords {
     records: Vec<Option<Vec<u8>>>,
+    full: Option<Vec<u8>>,
+}
+
+pub(crate) fn full_key(x: i32, z: i32, dimension: i32) -> Vec<u8> {
+    let mut key = b"voxelpopuli:blocks:".to_vec();
+    key.extend_from_slice(&dimension.to_le_bytes());
+    key.extend_from_slice(&x.to_le_bytes());
+    key.extend_from_slice(&z.to_le_bytes());
+    key
+}
+
+fn encode_full(chunk: &Chunk) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH * 3);
+    out.extend_from_slice(b"VPBL");
+    out.push(1);
+    for x in 0..CHUNK_WIDTH {
+        for y in 0..CHUNK_HEIGHT {
+            for z in 0..CHUNK_DEPTH {
+                out.extend_from_slice(&(chunk.blocks[x][y][z] as u16).to_le_bytes());
+                out.push(chunk.liquid_levels[x][y][z]);
+            }
+        }
+    }
+    out
+}
+
+fn apply_full(chunk: &mut Chunk, bytes: &[u8]) -> bool {
+    let Some(rest) = bytes.strip_prefix(b"VPBL") else {
+        return false;
+    };
+    let Some((&1, mut rest)) = rest.split_first() else {
+        return false;
+    };
+    for x in 0..CHUNK_WIDTH {
+        for y in 0..CHUNK_HEIGHT {
+            for z in 0..CHUNK_DEPTH {
+                if rest.len() < 3 {
+                    return false;
+                }
+                let id = u16::from_le_bytes([rest[0], rest[1]]);
+                chunk.blocks[x][y][z] = BlockType::from_u16(id);
+                chunk.liquid_levels[x][y][z] = rest[2];
+                rest = &rest[3..];
+            }
+        }
+    }
+    rest.is_empty()
 }
 
 pub fn read_records(db: &Database, x: i32, z: i32, dimension: i32) -> io::Result<ChunkRecords> {
@@ -46,12 +93,13 @@ pub fn read_records(db: &Database, x: i32, z: i32, dimension: i32) -> io::Result
     );
     Ok(ChunkRecords {
         records: db.get_many(keys)?,
+        full: db.get(&full_key(x, z, dimension))?,
     })
 }
 
 impl ChunkRecords {
     pub fn exists(&self) -> bool {
-        self.records.iter().any(Option::is_some)
+        self.full.is_some() || self.records.iter().any(Option::is_some)
     }
 
     pub fn decode(self, x: i32, z: i32, seed: u64) -> io::Result<Option<Chunk>> {
@@ -59,6 +107,12 @@ impl ChunkRecords {
             return Ok(None);
         }
         let mut chunk = Chunk::new(x, z, seed);
+        if let Some(bytes) = self.full
+            && apply_full(&mut chunk, &bytes)
+        {
+            chunk.calculate_lighting();
+            return Ok(Some(chunk));
+        }
         for (section, bytes) in self.records.into_iter().skip(1).enumerate() {
             let Some(bytes) = bytes else {
                 continue;
@@ -77,12 +131,22 @@ impl ChunkRecords {
                     )
                 })
                 .collect();
+            if layer.indices.len() != 4096 {
+                continue;
+            }
             for (index, &entry) in layer.indices.iter().enumerate() {
                 let (x, y, z) = cell(index, section);
                 let (block, depth) = palette[entry as usize];
-                chunk.blocks[x][y][z] = block;
-                if matches!(block, BlockType::Water | BlockType::Lava) {
-                    chunk.liquid_levels[x][y][z] = depth + 1;
+                let level = if matches!(block, BlockType::Water | BlockType::Lava) {
+                    depth + 1
+                } else {
+                    0
+                };
+                for dz in 0..2 {
+                    for dx in 0..2 {
+                        chunk.blocks[x * 2 + dx][y][z * 2 + dz] = block;
+                        chunk.liquid_levels[x * 2 + dx][y][z * 2 + dz] = level;
+                    }
                 }
             }
         }
@@ -133,9 +197,11 @@ pub fn chunk_records(
         let mut changed = original.is_none();
         for index in 0..4096 {
             let (x, y, z) = cell(index, section);
-            let block = chunk.blocks[x][y][z];
+            let block = chunk.blocks[x * 2][y][z * 2];
             let liquid = if matches!(block, BlockType::Water | BlockType::Lava) {
-                chunk.liquid_levels[x][y][z].saturating_sub(1).min(15)
+                chunk.liquid_levels[x * 2][y][z * 2]
+                    .saturating_sub(1)
+                    .min(15)
             } else {
                 0
             };
@@ -178,6 +244,11 @@ pub fn chunk_records(
             layer.palette = compact;
             records.push((key, subchunk.encode()?));
         }
+    }
+    let encoded = encode_full(chunk);
+    let key = full_key(chunk.x, chunk.z, dimension);
+    if db.get(&key)?.as_deref() != Some(encoded.as_slice()) {
+        records.push((key, encoded));
     }
     Ok(records)
 }

@@ -915,14 +915,15 @@ async fn run_with_args(args: Vec<String>) {
                 [255, 255, 255, 255],
                 (sw, sh),
             );
-            // BG (Inside border)
+            // Track. Lighter than the screen behind it, so an unfinished
+            // load does not look like a single white line.
             draw_rect(
                 &ui_shader,
                 bar_x,
                 bar_y,
                 bar_w,
                 bar_h,
-                [30, 30, 30, 255],
+                [72, 72, 72, 255],
                 (sw, sh),
             );
 
@@ -1841,9 +1842,9 @@ async fn run_with_args(args: Vec<String>) {
             if open_container.is_some_and(|pos: (i32, i32, i32)| {
                 !world.containers.contains_key(&pos)
                     || player.position.distance(Vec3::new(
-                        pos.0 as f32 + 0.5,
-                        pos.1 as f32 + 0.5,
-                        pos.2 as f32 + 0.5,
+                        chunk::block_center_x(pos.0),
+                        chunk::block_center_y(pos.1),
+                        chunk::block_center_z(pos.2),
                     )) > 8.0
             }) {
                 open_container = None;
@@ -1934,9 +1935,9 @@ async fn run_with_args(args: Vec<String>) {
                     if xp_val > 0 {
                         world.xp_orbs.push(crate::block::XpOrbEntity {
                             position: Vec3::new(
-                                mined.x as f32 + 0.5,
-                                mined.y as f32 + 0.5,
-                                mined.z as f32 + 0.5,
+                                chunk::block_center_x(mined.x),
+                                chunk::block_center_y(mined.y),
+                                chunk::block_center_z(mined.z),
                             ),
                             velocity: Vec3::new(
                                 (rand::random::<f32>() - 0.5) * 1.5,
@@ -2078,7 +2079,11 @@ async fn run_with_args(args: Vec<String>) {
         };
         let (camera_pos, camera_look) = perspective.view(eye_pos, look_dir, |p| {
             world
-                .get_block(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
+                .get_block(
+                    chunk::world_to_block_x(p.x),
+                    chunk::world_to_block_y(p.y),
+                    chunk::world_to_block_z(p.z),
+                )
                 .is_solid()
         });
         let view = hurt_mat
@@ -2494,9 +2499,9 @@ async fn run_with_args(args: Vec<String>) {
 
         // Liquid screen overlay (below HUD)
         let cam_block = world.get_block(
-            camera_pos.x.floor() as i32,
-            camera_pos.y.floor() as i32,
-            camera_pos.z.floor() as i32,
+            chunk::world_to_block_x(camera_pos.x),
+            chunk::world_to_block_y(camera_pos.y),
+            chunk::world_to_block_z(camera_pos.z),
         );
         let camera_submerged = world::render_volume::camera_in_water(&world, camera_pos);
         if cam_block == BlockType::Lava || (camera_submerged && !deferred) {
@@ -2647,8 +2652,8 @@ async fn run_with_args(args: Vec<String>) {
                 "West",
                 "Southwest",
             ][(((yaw_deg + 22.5) / 45.0) as usize) % 8];
-            let cx = (player.position.x / chunk::CHUNK_WIDTH as f32).floor() as i32;
-            let cz = (player.position.z / chunk::CHUNK_DEPTH as f32).floor() as i32;
+            let cx = chunk::chunk_of_world_x(player.position.x);
+            let cz = chunk::chunk_of_world_z(player.position.z);
             let stats = profiler.stats();
             let loaded_chunks = world.chunks.iter().flatten().count();
             let lines = [
@@ -2670,9 +2675,9 @@ async fn run_with_args(args: Vec<String>) {
                 ),
                 format!(
                     "Block: {} {} {}",
-                    player.position.x.floor() as i32,
-                    player.position.y.floor() as i32,
-                    player.position.z.floor() as i32
+                    chunk::world_to_block_x(player.position.x),
+                    chunk::world_to_block_y(player.position.y),
+                    chunk::world_to_block_z(player.position.z)
                 ),
                 format!(
                     "Chunk Pool: {cx} {cz} ({} loaded, {} dirty, {} in-flight)",
@@ -3547,9 +3552,9 @@ async fn run_with_args(args: Vec<String>) {
 
             // Oxygen bubbles (above food bar)
             let head_in_w = world.get_block(
-                eye_pos.x.floor() as i32,
-                eye_pos.y.floor() as i32,
-                eye_pos.z.floor() as i32,
+                chunk::world_to_block_x(eye_pos.x),
+                chunk::world_to_block_y(eye_pos.y),
+                chunk::world_to_block_z(eye_pos.z),
             ) == BlockType::Water;
             if head_in_w || player.air_seconds < 15.0 {
                 let ox_start = fx_start;
@@ -3736,9 +3741,9 @@ async fn run_with_args(args: Vec<String>) {
                     "World smoke: {mode}, player={:?}, camera={camera_angle:?}, eye={eye_pos:?}, block={:?}, day_time={}, visible_chunks={}",
                     player.position,
                     world.get_block(
-                        eye_pos.x.floor() as i32,
-                        eye_pos.y.floor() as i32,
-                        eye_pos.z.floor() as i32
+                        chunk::world_to_block_x(eye_pos.x),
+                        chunk::world_to_block_y(eye_pos.y),
+                        chunk::world_to_block_z(eye_pos.z)
                     ),
                     world.day_time,
                     world.visible_chunks.len()

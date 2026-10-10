@@ -1,6 +1,10 @@
 use super::World;
 use crate::block::BlockType;
-use crate::chunk::{CHUNK_HEIGHT, unpack_light, water_render_height};
+use crate::chunk::{
+    BLOCK_SIZE_X, BLOCK_SIZE_Z, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, block_origin_x,
+    block_origin_y, block_origin_z, unpack_light, water_render_height, world_to_block_x,
+    world_to_block_y, world_to_block_z,
+};
 use glam::Vec3;
 use std::collections::HashMap;
 
@@ -34,7 +38,10 @@ impl RenderVolume {
                     Some(0)
                 } else {
                     world
-                        .get_chunk(position[0].div_euclid(16), position[2].div_euclid(16))
+                        .get_chunk(
+                            crate::chunk::chunk_of_world_x(position[0] as f32),
+                            crate::chunk::chunk_of_world_z(position[2] as f32),
+                        )
                         .map(|chunk| chunk.render_revision)
                 }
             },
@@ -144,13 +151,18 @@ fn sample_world(world: &World, [x, y, z]: [i32; 3]) -> [u8; 4] {
     if y >= CHUNK_HEIGHT as i32 {
         return [128, 255, 0, 0];
     }
-    let Some(chunk) = world.get_chunk(x.div_euclid(16), z.div_euclid(16)) else {
+    let block_x = world_to_block_x(x as f32);
+    let block_z = world_to_block_z(z as f32);
+    let Some(chunk) = world.get_chunk(
+        block_x.div_euclid(CHUNK_WIDTH as i32),
+        block_z.div_euclid(CHUNK_DEPTH as i32),
+    ) else {
         return [0; 4];
     };
     let (bx, by, bz) = (
-        x.rem_euclid(16) as usize,
+        block_x.rem_euclid(CHUNK_WIDTH as i32) as usize,
         y as usize,
-        z.rem_euclid(16) as usize,
+        block_z.rem_euclid(CHUNK_DEPTH as i32) as usize,
     );
     encode_voxel(
         chunk.blocks[bx][by][bz],
@@ -163,7 +175,9 @@ pub fn camera_in_water(world: &World, camera: Vec3) -> bool {
     if !camera.is_finite() {
         return false;
     }
-    let [x, y, z] = camera.floor().as_ivec3().to_array();
+    let x = world_to_block_x(camera.x);
+    let y = world_to_block_y(camera.y);
+    let z = world_to_block_z(camera.z);
     if world.get_block(x, y, z) != BlockType::Water {
         return false;
     }
@@ -194,7 +208,10 @@ pub fn camera_in_water(world: &World, camera: Vec3) -> bool {
             height / count as f32
         }
     };
-    let (u, v) = (camera.x - x as f32, camera.z - z as f32);
+    let (u, v) = (
+        (camera.x - block_origin_x(x)) / BLOCK_SIZE_X,
+        (camera.z - block_origin_z(z)) / BLOCK_SIZE_Z,
+    );
     let h00 = corner(x, z);
     let h10 = corner(x + 1, z);
     let h11 = corner(x + 1, z + 1);
@@ -205,7 +222,7 @@ pub fn camera_in_water(world: &World, camera: Vec3) -> bool {
     } else {
         h00 + (h10 - h00) * u + (h11 - h10) * v
     };
-    camera.y - (y as f32) < surface
+    camera.y - block_origin_y(y) < surface
 }
 
 #[cfg(test)]
@@ -311,10 +328,10 @@ mod tests {
         let mut chunk = Chunk::new(0, 0, 7);
         chunk.set_block(1, 40, 1, BlockType::Water);
         world.insert_chunk(chunk);
-        assert!(camera_in_water(&world, Vec3::new(1.2, 40.2, 1.2)));
-        assert!(!camera_in_water(&world, Vec3::new(1.2, 41.2, 1.2)));
+        assert!(camera_in_water(&world, Vec3::new(0.7, 40.2, 0.7)));
+        assert!(!camera_in_water(&world, Vec3::new(0.7, 41.2, 0.7)));
         world.set_block(1, 40, 1, BlockType::Stone);
-        assert!(!camera_in_water(&world, Vec3::new(1.2, 40.2, 1.2)));
+        assert!(!camera_in_water(&world, Vec3::new(0.7, 40.2, 0.7)));
     }
 
     #[test]

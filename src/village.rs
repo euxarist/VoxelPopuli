@@ -8,9 +8,11 @@
 
 use crate::block::BlockType;
 use crate::chunk::{
-    Biome, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, Chunk, ChunkRng, chunk_hash, hash_unit,
-    terrain_height_and_biome,
+    BLOCK_SIZE_X, BLOCK_SIZE_Z, Biome, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, Chunk, ChunkRng,
+    block_center_x, block_center_z, chunk_hash, hash_unit, terrain_height_and_biome,
 };
+#[cfg(test)]
+use crate::chunk::{world_to_block_x, world_to_block_z};
 use glam::Vec3;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -146,11 +148,12 @@ impl Village {
             let ccz = rz * REGION_CHUNKS
                 + margin
                 + (chunk_hash(seed, rx, rz, 9003 + attempt * 2) % span) as i32;
-            let center_x = ccx * CHUNK_WIDTH as i32 + 8;
-            let center_z = ccz * CHUNK_DEPTH as i32 + 8;
+            let center_x = ccx * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32 / 2;
+            let center_z = ccz * CHUNK_DEPTH as i32 + CHUNK_DEPTH as i32 / 2;
+            let center_mx = center_x as f32 * BLOCK_SIZE_X;
+            let center_mz = center_z as f32 * BLOCK_SIZE_Z;
 
-            let (center_h, biome) =
-                terrain_height_and_biome(center_x as f32, center_z as f32, seed);
+            let (center_h, biome) = terrain_height_and_biome(center_mx, center_mz, seed);
             if biome != Biome::Plains && biome != Biome::Desert {
                 continue;
             }
@@ -162,8 +165,8 @@ impl Village {
             for dx in [-16i32, -8, 0, 8, 16] {
                 for dz in [-16i32, -8, 0, 8, 16] {
                     let (h, _) = terrain_height_and_biome(
-                        (center_x + dx) as f32,
-                        (center_z + dz) as f32,
+                        center_mx + dx as f32,
+                        center_mz + dz as f32,
                         seed,
                     );
                     min_h = min_h.min(h);
@@ -224,7 +227,11 @@ impl Village {
             (0, ROAD_REACH),
             (0, -ROAD_REACH),
         ] {
-            let (h, _) = terrain_height_and_biome((cx + dx) as f32, (cz + dz) as f32, seed);
+            let (h, _) = terrain_height_and_biome(
+                (cx + dx) as f32 * BLOCK_SIZE_X,
+                (cz + dz) as f32 * BLOCK_SIZE_Z,
+                seed,
+            );
             let floor_y = h as i32;
             if (floor_y - self.base_y).abs() <= 6 {
                 self.structures.push(Structure {
@@ -281,7 +288,11 @@ impl Village {
                         // For plots along the Z road the footprint is rotated
                         let (w, d) = if axis == 0 { (w, d) } else { (d, w) };
 
-                        let (h, _) = terrain_height_and_biome(ax as f32, az as f32, seed);
+                        let (h, _) = terrain_height_and_biome(
+                            ax as f32 * BLOCK_SIZE_X,
+                            az as f32 * BLOCK_SIZE_Z,
+                            seed,
+                        );
                         let floor_y = h as i32;
                         if (floor_y - self.base_y).abs() > 5 {
                             continue;
@@ -335,9 +346,9 @@ impl Village {
             .map(|i| {
                 let (dx, dz) = *pads[i * pads.len() / n];
                 Vec3::new(
-                    (self.center_x + dx) as f32 + 0.5,
+                    block_center_x(self.center_x + dx),
                     (self.base_y + 1) as f32,
-                    (self.center_z + dz) as f32 + 0.5,
+                    block_center_z(self.center_z + dz),
                 )
             })
             .collect()
@@ -345,9 +356,9 @@ impl Village {
 
     pub fn golem_spawn(&self) -> Vec3 {
         Vec3::new(
-            (self.center_x + GOLEM_PAD.0) as f32 + 0.5,
+            block_center_x(self.center_x + GOLEM_PAD.0),
             (self.base_y + 1) as f32,
-            (self.center_z + GOLEM_PAD.1) as f32 + 0.5,
+            block_center_z(self.center_z + GOLEM_PAD.1),
         )
     }
 }
@@ -363,8 +374,8 @@ fn villages_near_chunk(seed: u64, cx: i32, cz: i32) -> Vec<Arc<Village>> {
     for rx in r0x..=r1x {
         for rz in r0z..=r1z {
             if let Some(v) = region_village(seed, rx, rz) {
-                let bx = cx * CHUNK_WIDTH as i32 + 8;
-                let bz = cz * CHUNK_DEPTH as i32 + 8;
+                let bx = cx * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32 / 2;
+                let bz = cz * CHUNK_DEPTH as i32 + CHUNK_DEPTH as i32 / 2;
                 if (v.center_x - bx).abs() <= VILLAGE_RADIUS + 8
                     && (v.center_z - bz).abs() <= VILLAGE_RADIUS + 8
                 {
@@ -871,8 +882,8 @@ mod tests {
             let mut chunk = Chunk::new(ccx, ccz, seed);
             chunk.generate();
             for pos in v.villager_spawns().into_iter().chain([v.golem_spawn()]) {
-                let lx = (pos.x.floor() as i32).rem_euclid(CHUNK_WIDTH as i32) as usize;
-                let lz = (pos.z.floor() as i32).rem_euclid(CHUNK_DEPTH as i32) as usize;
+                let lx = world_to_block_x(pos.x).rem_euclid(CHUNK_WIDTH as i32) as usize;
+                let lz = world_to_block_z(pos.z).rem_euclid(CHUNK_DEPTH as i32) as usize;
                 let feet = pos.y.floor() as usize;
                 assert!(
                     chunk.blocks[lx][feet - 1][lz].is_solid(),
@@ -1002,10 +1013,10 @@ mod layout_probe {
         let x0 = v.center_x - r;
         let z0 = v.center_z - r;
         // Generate all chunks covering the area, then sample surfaces
-        let c0x = (x0).div_euclid(16);
-        let c1x = (v.center_x + r).div_euclid(16);
-        let c0z = (z0).div_euclid(16);
-        let c1z = (v.center_z + r).div_euclid(16);
+        let c0x = (x0).div_euclid(CHUNK_WIDTH as i32);
+        let c1x = (v.center_x + r).div_euclid(CHUNK_WIDTH as i32);
+        let c0z = (z0).div_euclid(CHUNK_DEPTH as i32);
+        let c1z = (v.center_z + r).div_euclid(CHUNK_DEPTH as i32);
         let mut chunks = std::collections::HashMap::new();
         for cx in c0x..=c1x {
             for cz in c0z..=c1z {
@@ -1017,8 +1028,14 @@ mod layout_probe {
         for wz in z0..=(v.center_z + r) {
             let mut row = String::new();
             for wx in x0..=(v.center_x + r) {
-                let c = &chunks[&(wx.div_euclid(16), wz.div_euclid(16))];
-                let (lx, lz) = (wx.rem_euclid(16) as usize, wz.rem_euclid(16) as usize);
+                let c = &chunks[&(
+                    wx.div_euclid(CHUNK_WIDTH as i32),
+                    wz.div_euclid(CHUNK_DEPTH as i32),
+                )];
+                let (lx, lz) = (
+                    wx.rem_euclid(CHUNK_WIDTH as i32) as usize,
+                    wz.rem_euclid(CHUNK_DEPTH as i32) as usize,
+                );
                 let mut ch = '.';
                 for y in (1..255usize).rev() {
                     let b = c.blocks[lx][y][lz];

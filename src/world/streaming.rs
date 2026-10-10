@@ -337,6 +337,62 @@ mod tests {
     }
 
     #[test]
+    fn loading_screen_does_not_upload_every_ready_mesh_in_one_update() {
+        let mut world = World::simulation(42);
+        world.is_loading = true;
+        world.view_distance = 0;
+        world.last_pcx = 0;
+        world.last_pcz = 0;
+        let mut chunk = Box::new(Chunk::new(0, 0, 42));
+        chunk.dirty = false;
+        let light = chunk.light.clone();
+        let index = world.get_pool_index(0, 0);
+        world.chunks[index] = Some(chunk);
+        let mesh = || crate::chunk::MeshData {
+            v: vec![],
+            t: vec![],
+            n: vec![],
+            c: vec![],
+        };
+        let queued = 24i32;
+        world.meshing_in_flight = queued;
+        for i in 0..queued {
+            world
+                .mesh_result_tx
+                .send(MeshResult {
+                    x: 1_000 + i,
+                    z: 0,
+                    job_id: i as u64,
+                    light: light.clone(),
+                    opaque: mesh(),
+                    transparent: mesh(),
+                    water: mesh(),
+                })
+                .unwrap();
+        }
+        world.update(Vec3::ZERO, 0., BlockType::Air);
+        let cap = super::super::LOADING_MESH_UPLOADS_PER_UPDATE as i32;
+        let left = world.meshing_in_flight;
+        assert!(
+            (queued - cap..=queued - 1).contains(&left),
+            "one loading update consumed {} of {queued} mesh results",
+            queued - left
+        );
+        assert!(world.is_loading);
+        world.update(Vec3::ZERO, 0., BlockType::Air);
+        assert!(world.meshing_in_flight < left);
+        assert!(world.meshing_in_flight > 0);
+        for _ in 0..queued {
+            if !world.is_loading {
+                break;
+            }
+            world.update(Vec3::ZERO, 0., BlockType::Air);
+        }
+        assert!(!world.is_loading);
+        assert_eq!(world.meshing_in_flight, 0);
+    }
+
+    #[test]
     fn completed_chunks_are_integrated_in_bounded_batches() {
         let mut world = World::simulation(42);
         world.is_loading = false;

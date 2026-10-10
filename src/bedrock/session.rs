@@ -4,7 +4,10 @@ use super::{
     store::{Database, read_level},
     terrain,
 };
-use crate::{chunk::Chunk, java_compat::NbtTag};
+use crate::{
+    chunk::{CHUNK_DEPTH, CHUNK_WIDTH, Chunk},
+    java_compat::NbtTag,
+};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -37,13 +40,20 @@ impl WorldStore {
             return Ok(vec![]);
         };
         let mut containers = Vec::new();
+        let legacy = self.record(&terrain::full_key(x, z, dimension))?.is_none();
+        let span_x = if legacy { 16 } else { CHUNK_WIDTH as i32 };
+        let span_z = if legacy { 16 } else { CHUNK_DEPTH as i32 };
         for record in super::records::decode_stream(&bytes)? {
             if let Some(container) = super::records::decode_container(&record)? {
-                let position = super::records::position(&record)?;
-                if position.0.div_euclid(16) != x || position.2.div_euclid(16) != z {
+                let mut position = super::records::position(&record)?;
+                if position.0.div_euclid(span_x) != x || position.2.div_euclid(span_z) != z {
                     return Err(super::records::invalid(
                         "Block entity stored in the wrong chunk",
                     ));
+                }
+                if legacy {
+                    position.0 *= 2;
+                    position.2 *= 2;
                 }
                 if (0..256).contains(&position.1) {
                     containers.push((position, container));
@@ -151,8 +161,14 @@ fn new_metadata(seed: u64) -> io::Result<NbtTag> {
     use NbtTag::*;
     let mut chunk = Chunk::new(0, 0, seed);
     chunk.generate();
-    let mut columns: Vec<_> = (0..16).flat_map(|x| (0..16).map(move |z| (x, z))).collect();
-    columns.sort_by_key(|&(x, z)| (x as i32 - 8).pow(2) + (z as i32 - 8).pow(2));
+    let mut columns: Vec<_> = (0..CHUNK_WIDTH)
+        .flat_map(|x| (0..CHUNK_DEPTH).map(move |z| (x, z)))
+        .collect();
+    columns.sort_by_key(|&(x, z)| {
+        let dx = x as i32 - CHUNK_WIDTH as i32 / 2;
+        let dz = z as i32 - CHUNK_DEPTH as i32 / 2;
+        dx * dx + dz * dz
+    });
     let spawn = [false, true]
         .into_iter()
         .find_map(|allow_water| {
@@ -195,6 +211,7 @@ fn new_metadata(seed: u64) -> io::Result<NbtTag> {
         ("SpawnX".into(), Int(spawn.0)),
         ("SpawnY".into(), Int(spawn.1)),
         ("SpawnZ".into(), Int(spawn.2)),
+        ("voxelpopuli:block_spawn".into(), Int(1)),
         ("Time".into(), Long(0)),
         ("currentTick".into(), Long(0)),
         ("commandsEnabled".into(), Byte(0)),
@@ -206,16 +223,22 @@ fn new_metadata(seed: u64) -> io::Result<NbtTag> {
 
 fn new_chunk_metadata(chunk: &Chunk, dimension: i32) -> Vec<(Vec<u8>, Vec<u8>)> {
     let key = |tag| chunk_key(chunk.x, chunk.z, dimension, tag, None);
-    // Data3D: 256 little-endian heights followed by 24 runtime-ID biome palettes.
+    // Data3D: 256 little-endian heights (one per meter) followed by 24 biome palettes.
     let mut biomes = Vec::with_capacity(632);
-    for (z, _) in chunk.blocks[0][0].iter().enumerate() {
-        for column in chunk.blocks.iter() {
-            let top = column
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, row)| row[z] != crate::block::BlockType::Air)
-                .map_or(0, |(y, _)| y + 1);
+    for z in 0..16 {
+        for x in 0..16 {
+            let mut top = 0usize;
+            for dz in 0..2 {
+                for dx in 0..2 {
+                    let column_top = chunk.blocks[x * 2 + dx]
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, row)| row[z * 2 + dz] != crate::block::BlockType::Air)
+                        .map_or(0, |(y, _)| y + 1);
+                    top = top.max(column_top);
+                }
+            }
             biomes.extend_from_slice(&((top + 64) as u16).to_le_bytes());
         }
     }

@@ -1,6 +1,6 @@
 use crate::block::BlockType;
 use crate::chunk::{
-    Biome, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, Chunk, GeneratorVersion, biome_at_version,
+    Biome, CHUNK_HEIGHT, CHUNK_SPAN_X, CHUNK_SPAN_Z, Chunk, GeneratorVersion, biome_at_version,
 };
 use flate2::Compression;
 use flate2::write::{GzEncoder, ZlibEncoder};
@@ -19,7 +19,28 @@ pub const JAVA_1_17_DATA_VERSION: i32 = 2724;
 pub const MIN_Y: i32 = 0;
 pub const MAX_Y: i32 = 255;
 pub const SECTION_HEIGHT: usize = 16;
+/// Classic Anvil chunks stay 16×16 blocks. Each of those blocks is one meter,
+/// which is a 2×2 of the game's half-meter columns.
+pub const JAVA_CHUNK_WIDTH: usize = 16;
+pub const JAVA_CHUNK_DEPTH: usize = 16;
 pub const SECTIONS_PER_CHUNK: usize = CHUNK_HEIGHT / SECTION_HEIGHT;
+
+fn java_cell_block(chunk: &Chunk, x: usize, y: usize, z: usize) -> BlockType {
+    let mut found = BlockType::Air;
+    for dz in 0..2 {
+        for dx in 0..2 {
+            let block = chunk.blocks[x + dx][y][z + dz];
+            if block != BlockType::Air {
+                found = block;
+                break;
+            }
+        }
+        if found != BlockType::Air {
+            break;
+        }
+    }
+    found
+}
 pub const REGION_CHUNKS: i32 = 32;
 
 type RegionChunk = (i32, i32, Vec<u8>);
@@ -91,7 +112,7 @@ pub fn classic_world_height_matches_chunks() -> bool {
 }
 
 pub fn classic_chunk_dimensions() -> (usize, usize, usize) {
-    (CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH)
+    (JAVA_CHUNK_WIDTH, CHUNK_HEIGHT, JAVA_CHUNK_DEPTH)
 }
 
 pub fn classic_java_block_state(block: BlockType) -> Option<JavaBlockState> {
@@ -585,12 +606,12 @@ fn classic_chunk_fields(chunk: &Chunk) -> Vec<(String, NbtTag)> {
 pub fn build_tile_entities(chunk: &Chunk) -> Vec<NbtTag> {
     let mut tile_entities = Vec::new();
     for y in 0..CHUNK_HEIGHT {
-        for z in 0..CHUNK_DEPTH {
-            for x in 0..CHUNK_WIDTH {
-                let block = chunk.blocks[x][y][z];
-                let world_x = chunk.x * CHUNK_WIDTH as i32 + x as i32;
+        for z in (0..crate::chunk::CHUNK_DEPTH).step_by(2) {
+            for x in (0..crate::chunk::CHUNK_WIDTH).step_by(2) {
+                let block = java_cell_block(chunk, x, y, z);
+                let world_x = chunk.x * JAVA_CHUNK_WIDTH as i32 + x as i32 / 2;
                 let world_y = y as i32;
-                let world_z = chunk.z * CHUNK_DEPTH as i32 + z as i32;
+                let world_z = chunk.z * JAVA_CHUNK_DEPTH as i32 + z as i32 / 2;
 
                 match block {
                     BlockType::Chest => {
@@ -802,14 +823,15 @@ fn build_sections(chunk: &Chunk) -> Vec<NbtTag> {
     let mut sections = Vec::new();
     for section_y in 0..SECTIONS_PER_CHUNK {
         let mut palette = Vec::<JavaBlockState>::new();
-        let mut indices = Vec::<u16>::with_capacity(CHUNK_WIDTH * CHUNK_DEPTH * SECTION_HEIGHT);
+        let mut indices =
+            Vec::<u16>::with_capacity(JAVA_CHUNK_WIDTH * JAVA_CHUNK_DEPTH * SECTION_HEIGHT);
         let mut contains_non_air = false;
 
         for y in 0..SECTION_HEIGHT {
             let world_y = section_y * SECTION_HEIGHT + y;
-            for (z, _) in chunk.blocks[0][world_y].iter().enumerate() {
-                for column in chunk.blocks.iter() {
-                    let block = column[world_y][z];
+            for z in 0..JAVA_CHUNK_DEPTH {
+                for x in 0..JAVA_CHUNK_WIDTH {
+                    let block = java_cell_block(chunk, x * 2, world_y, z * 2);
                     if block != BlockType::Air {
                         contains_non_air = true;
                     }
@@ -872,15 +894,23 @@ fn palette_entry_nbt(state: JavaBlockState) -> NbtTag {
     NbtTag::Compound(fields)
 }
 
+fn column_top(chunk: &Chunk, x: usize, z: usize) -> u16 {
+    for (y, row) in chunk.blocks[x].iter().enumerate().rev() {
+        if row[z] != BlockType::Air {
+            return (y + 1) as u16;
+        }
+    }
+    0
+}
+
 fn build_heightmap(chunk: &Chunk) -> Vec<i64> {
-    let mut heights = Vec::<u16>::with_capacity(CHUNK_WIDTH * CHUNK_DEPTH);
-    for (z, _) in chunk.blocks[0][0].iter().enumerate() {
-        for column in chunk.blocks.iter() {
+    let mut heights = Vec::<u16>::with_capacity(JAVA_CHUNK_WIDTH * JAVA_CHUNK_DEPTH);
+    for z in 0..JAVA_CHUNK_DEPTH {
+        for x in 0..JAVA_CHUNK_WIDTH {
             let mut height = 0u16;
-            for (y, row) in column.iter().enumerate().rev() {
-                if row[z] != BlockType::Air {
-                    height = (y + 1) as u16;
-                    break;
+            for dz in 0..2 {
+                for dx in 0..2 {
+                    height = height.max(column_top(chunk, x * 2 + dx, z * 2 + dz));
                 }
             }
             heights.push(height);
@@ -894,11 +924,11 @@ fn build_biomes(chunk: &Chunk) -> Vec<i32> {
     for _y in 0..64 {
         for z in 0..4 {
             for x in 0..4 {
-                let world_x = chunk.x * CHUNK_WIDTH as i32 + x * 4 + 2;
-                let world_z = chunk.z * CHUNK_DEPTH as i32 + z * 4 + 2;
+                let world_x = chunk.x as f32 * CHUNK_SPAN_X + (x * 4 + 2) as f32;
+                let world_z = chunk.z as f32 * CHUNK_SPAN_Z + (z * 4 + 2) as f32;
                 biomes.push(java_biome_id(biome_at_version(
-                    world_x as f32,
-                    world_z as f32,
+                    world_x,
+                    world_z,
                     chunk.seed,
                     chunk.generator_version,
                 )));
@@ -1547,13 +1577,13 @@ pub fn import_chunk_from_nbt(decompressed_nbt: &[u8]) -> io::Result<Chunk> {
             let indices = unpack_values(
                 block_states,
                 bits_per_block,
-                CHUNK_WIDTH * CHUNK_DEPTH * SECTION_HEIGHT,
+                JAVA_CHUNK_WIDTH * JAVA_CHUNK_DEPTH * SECTION_HEIGHT,
             );
 
             for (idx, &pal_idx) in indices.iter().enumerate() {
-                let x = idx % CHUNK_WIDTH;
-                let z = (idx / CHUNK_WIDTH) % CHUNK_DEPTH;
-                let y = idx / (CHUNK_WIDTH * CHUNK_DEPTH);
+                let x = idx % JAVA_CHUNK_WIDTH;
+                let z = (idx / JAVA_CHUNK_WIDTH) % JAVA_CHUNK_DEPTH;
+                let y = idx / (JAVA_CHUNK_WIDTH * JAVA_CHUNK_DEPTH);
                 let world_y = (sec_y as usize * SECTION_HEIGHT) + y;
 
                 if world_y < CHUNK_HEIGHT {
@@ -1561,7 +1591,11 @@ pub fn import_chunk_from_nbt(decompressed_nbt: &[u8]) -> io::Result<Chunk> {
                         .get(pal_idx as usize)
                         .copied()
                         .unwrap_or(BlockType::Air);
-                    chunk.blocks[x][world_y][z] = block;
+                    for dz in 0..2 {
+                        for dx in 0..2 {
+                            chunk.blocks[x * 2 + dx][world_y][z * 2 + dz] = block;
+                        }
+                    }
                 }
             }
         }
@@ -1580,6 +1614,25 @@ pub fn import_chunk_from_nbt(decompressed_nbt: &[u8]) -> io::Result<Chunk> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn java_round_trip_matches(original: &Chunk, imported: &Chunk) -> bool {
+        for x in (0..crate::chunk::CHUNK_WIDTH).step_by(2) {
+            for z in (0..crate::chunk::CHUNK_DEPTH).step_by(2) {
+                for (y, _) in imported.blocks[x].iter().enumerate() {
+                    let expected = java_cell_block(original, x, y, z);
+                    for dz in 0..2 {
+                        for dx in 0..2 {
+                            if imported.blocks[x + dx][y][z + dz] != expected {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     #[test]
     fn java_export_preserves_legacy_generator_terrain() {
         let (seed, original) = (0..64)
@@ -1599,7 +1652,7 @@ mod tests {
         };
         export_classic_java_world(seed, GeneratorVersion::Legacy, &config).unwrap();
         let imported = import_classic_java_chunk(&out, 0, 0).unwrap().unwrap();
-        let matches = imported.blocks == original.blocks;
+        let matches = java_round_trip_matches(&original, &imported);
         std::fs::remove_dir_all(out).unwrap();
         assert!(
             matches,
@@ -1714,11 +1767,11 @@ mod tests {
 
     #[test]
     fn packed_block_states_use_expected_long_count() {
-        let values = vec![0u16; CHUNK_WIDTH * CHUNK_DEPTH * SECTION_HEIGHT];
+        let values = vec![0u16; JAVA_CHUNK_WIDTH * JAVA_CHUNK_DEPTH * SECTION_HEIGHT];
         assert_eq!(pack_values(&values, 4).len(), 256);
 
         // 9-bit entries: 7 per long, 256 entries -> 37 longs (1.16+ padded layout)
-        let height_values = vec![64u16; CHUNK_WIDTH * CHUNK_DEPTH];
+        let height_values = vec![64u16; JAVA_CHUNK_WIDTH * JAVA_CHUNK_DEPTH];
         assert_eq!(pack_values(&height_values, 9).len(), 37);
     }
 
@@ -1810,9 +1863,10 @@ mod tests {
     #[test]
     fn test_tile_entities_nbt_generation() {
         let mut chunk = Chunk::new(0, 0, 12345);
+        // Each Java cell is a 2x2, so tile entities sit on distinct even columns.
         chunk.blocks[0][64][0] = BlockType::Chest;
-        chunk.blocks[1][64][0] = BlockType::Furnace;
-        chunk.blocks[2][64][0] = BlockType::MobSpawner;
+        chunk.blocks[2][64][0] = BlockType::Furnace;
+        chunk.blocks[4][64][0] = BlockType::MobSpawner;
 
         let tile_entities = build_tile_entities(&chunk);
         assert_eq!(tile_entities.len(), 3);
@@ -1867,27 +1921,9 @@ mod tests {
         assert_eq!(streamed.x, original.x);
         assert_eq!(streamed.z, original.z);
 
-        let mut matching_blocks = 0;
-        let mut total_blocks = 0;
-        let mut mismatch_map = std::collections::HashMap::new();
-        for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                for z in 0..CHUNK_DEPTH {
-                    total_blocks += 1;
-                    let orig = original.blocks[x][y][z];
-                    let imp = streamed.blocks[x][y][z];
-                    if imp == orig {
-                        matching_blocks += 1;
-                    } else {
-                        *mismatch_map.entry((orig, imp)).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-        println!("Block mismatches: {:?}", mismatch_map);
-        assert_eq!(
-            matching_blocks, total_blocks,
-            "imported chunk blocks must match 100%"
+        assert!(
+            java_round_trip_matches(&original, &streamed),
+            "imported chunk blocks must match the exported meter cells"
         );
 
         let _ = std::fs::remove_dir_all(out);

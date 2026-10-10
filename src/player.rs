@@ -1,4 +1,8 @@
 use crate::block::BlockType;
+use crate::chunk::{
+    BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z, block_center_x, block_center_z, block_origin_x,
+    block_origin_y, block_origin_z, world_to_block_x, world_to_block_y, world_to_block_z,
+};
 use crate::item;
 use crate::sprint;
 use crate::world::World;
@@ -16,9 +20,9 @@ pub fn surface_spawn_near(
     target: Vec3,
     mut block_at: impl FnMut(i32, i32, i32) -> BlockType,
 ) -> Option<Vec3> {
-    let (x, z) = (target.x.floor() as i32, target.z.floor() as i32);
+    let (x, z) = (world_to_block_x(target.x), world_to_block_z(target.z));
     let mut water_fallback = None;
-    for radius in 0i32..=32 {
+    for radius in 0i32..=64 {
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 if dx.abs().max(dz.abs()) != radius {
@@ -29,8 +33,11 @@ pub fn surface_spawn_near(
                     if spawn_clear(floor) {
                         continue;
                     }
-                    let position =
-                        Vec3::new((x + dx) as f32 + 0.5, (y + 1) as f32, (z + dz) as f32 + 0.5);
+                    let position = Vec3::new(
+                        block_center_x(x + dx),
+                        (y + 1) as f32,
+                        block_center_z(z + dz),
+                    );
                     if floor == BlockType::Water {
                         water_fallback.get_or_insert(position);
                     }
@@ -54,11 +61,11 @@ pub fn safe_spawn_near(
     target: Vec3,
     mut block_at: impl FnMut(i32, i32, i32) -> BlockType,
 ) -> Option<Vec3> {
-    let (x, z) = (target.x.floor() as i32, target.z.floor() as i32);
-    let preferred_y = (target.y.floor() as i32).clamp(1, crate::chunk::CHUNK_HEIGHT as i32 - 2);
+    let (x, z) = (world_to_block_x(target.x), world_to_block_z(target.z));
+    let preferred_y = world_to_block_y(target.y).clamp(1, crate::chunk::CHUNK_HEIGHT as i32 - 2);
     let mut heights = (1..crate::chunk::CHUNK_HEIGHT as i32 - 1).collect::<Vec<_>>();
     heights.sort_unstable_by_key(|y| (y - preferred_y).abs());
-    for radius in 0i32..=4 {
+    for radius in 0i32..=8 {
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 if dx.abs().max(dz.abs()) != radius {
@@ -72,9 +79,9 @@ pub fn safe_spawn_near(
                         && spawn_clear(block_at(x + dx, y + 1, z + dz))
                     {
                         return Some(Vec3::new(
-                            (x + dx) as f32 + 0.5,
+                            block_center_x(x + dx),
                             y as f32,
-                            (z + dz) as f32 + 0.5,
+                            block_center_z(z + dz),
                         ));
                     }
                 }
@@ -303,18 +310,18 @@ impl Player {
     }
 
     fn is_point_in_block(world: &World, p: Vec3) -> bool {
-        let bx = p.x.floor() as i32;
-        let by = p.y.floor() as i32;
-        let bz = p.z.floor() as i32;
+        let bx = world_to_block_x(p.x);
+        let by = world_to_block_y(p.y);
+        let bz = world_to_block_z(p.z);
         let b = world.get_block(bx, by, bz);
         if b == BlockType::Cactus {
-            let lx = p.x - bx as f32;
-            let lz = p.z - bz as f32;
+            let lx = (p.x - block_origin_x(bx)) / BLOCK_SIZE_X;
+            let lz = (p.z - block_origin_z(bz)) / BLOCK_SIZE_Z;
             return (1.0 / 16.0..=15.0 / 16.0).contains(&lx)
                 && (1.0 / 16.0..=15.0 / 16.0).contains(&lz);
         }
         if matches!(b, BlockType::OakDoor | BlockType::IronDoor) {
-            let lz = p.z - bz as f32;
+            let lz = (p.z - block_origin_z(bz)) / BLOCK_SIZE_Z;
             return (0.0..=3.0 / 16.0).contains(&lz);
         }
         b.is_solid()
@@ -354,8 +361,8 @@ impl Player {
         let w = 0.3;
         let player_min = self.position - Vec3::new(w, 0.0, w);
         let player_max = self.position + Vec3::new(w, self.body_height(), w);
-        let block_min = Vec3::new(bx as f32, by as f32, bz as f32);
-        let block_max = block_min + Vec3::ONE;
+        let block_min = Vec3::new(block_origin_x(bx), block_origin_y(by), block_origin_z(bz));
+        let block_max = block_min + Vec3::new(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
 
         player_max.x > block_min.x
             && player_min.x < block_max.x
@@ -405,22 +412,22 @@ impl Player {
         }
 
         let in_lava = world.get_block(
-            self.position.x.floor() as i32,
-            (self.position.y + 0.9).floor() as i32,
-            self.position.z.floor() as i32,
+            world_to_block_x(self.position.x),
+            world_to_block_y(self.position.y + 0.9),
+            world_to_block_z(self.position.z),
         ) == BlockType::Lava
             || world.get_block(
-                self.position.x.floor() as i32,
-                (self.position.y + 0.1).floor() as i32,
-                self.position.z.floor() as i32,
+                world_to_block_x(self.position.x),
+                world_to_block_y(self.position.y + 0.1),
+                world_to_block_z(self.position.z),
             ) == BlockType::Lava;
         let touching_cactus = !self.sandbox && {
-            let min_x = (self.position.x - 0.31).floor() as i32;
-            let max_x = (self.position.x + 0.31).floor() as i32;
-            let min_y = (self.position.y - 0.05).floor() as i32;
-            let max_y = (self.position.y + self.body_height()).floor() as i32;
-            let min_z = (self.position.z - 0.31).floor() as i32;
-            let max_z = (self.position.z + 0.31).floor() as i32;
+            let min_x = world_to_block_x(self.position.x - 0.31);
+            let max_x = world_to_block_x(self.position.x + 0.31);
+            let min_y = world_to_block_y(self.position.y - 0.05);
+            let max_y = world_to_block_y(self.position.y + self.body_height());
+            let min_z = world_to_block_z(self.position.z - 0.31);
+            let max_z = world_to_block_z(self.position.z + 0.31);
             let mut found = false;
             'check: for bx in min_x..=max_x {
                 for by in min_y..=max_y {
@@ -483,19 +490,19 @@ impl Player {
         self.crouch_amount += (target - self.crouch_amount) * (1.0 - (-20.0 * dt).exp());
 
         let waist_in_w = world.get_block(
-            self.position.x.floor() as i32,
-            (self.position.y + 0.9).floor() as i32,
-            self.position.z.floor() as i32,
+            world_to_block_x(self.position.x),
+            world_to_block_y(self.position.y + 0.9),
+            world_to_block_z(self.position.z),
         ) == BlockType::Water;
         let feet_in_w = world.get_block(
-            self.position.x.floor() as i32,
-            (self.position.y + 0.1).floor() as i32,
-            self.position.z.floor() as i32,
+            world_to_block_x(self.position.x),
+            world_to_block_y(self.position.y + 0.1),
+            world_to_block_z(self.position.z),
         ) == BlockType::Water;
         let head_in_w = world.get_block(
-            self.position.x.floor() as i32,
-            self.eye_position().y.floor() as i32,
-            self.position.z.floor() as i32,
+            world_to_block_x(self.position.x),
+            world_to_block_y(self.eye_position().y),
+            world_to_block_z(self.position.z),
         ) == BlockType::Water;
         let in_water = waist_in_w || feet_in_w;
 
@@ -654,6 +661,7 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{block_center_x, block_center_z, block_origin_x};
 
     fn movement_fixture() -> (World, Player) {
         let mut world = World::simulation(42);
@@ -720,9 +728,11 @@ mod tests {
         for y in 64..=66 {
             world.set_block(9, y, 8, BlockType::Stone);
         }
-        player.position.x = 8.75;
+        // Stand just west of block 9, centered on its column, so the step hits stone.
+        player.position.x = block_origin_x(9) - 0.3;
+        player.position.z = block_center_z(8);
         player.update(&world, Vec3::X, Vec3::X, 0.05, true, false, false, 0.0);
-        assert_eq!(player.position.x, 8.75);
+        assert_eq!(player.position.x, block_origin_x(9) - 0.3);
         assert_eq!(player.exhaustion, 0.0);
         assert!(!player.sprinting);
     }
@@ -824,7 +834,7 @@ mod tests {
     #[test]
     fn crouch_remains_when_ceiling_blocks_standing() {
         let (mut world, mut player) = movement_fixture();
-        player.position.y = 64.4;
+        player.position = Vec3::new(block_center_x(8), 64.4, block_center_z(8));
         player.sneaking = true;
         world.set_block(8, 66, 8, BlockType::Stone);
         player.update(&world, Vec3::X, Vec3::ZERO, 0.0, true, false, false, 1.0);
@@ -932,7 +942,9 @@ mod tests {
                 world.set_block(x, y, 8, BlockType::Water);
             }
         }
+        player.position.x = block_center_x(8);
         player.position.y = 64.0;
+        player.position.z = block_center_z(8);
         let start = player.position;
         player.update(&world, Vec3::X, Vec3::X, 0.05, true, false, false, 0.0);
         assert!(!player.sprinting);
@@ -980,7 +992,8 @@ mod tests {
 
     #[test]
     fn respawn_finds_standing_room_when_the_bed_location_is_obstructed() {
-        let spawn = safe_spawn_near(Vec3::new(0.5, 61.0, 0.5), |x, y, z| {
+        let blocked = Vec3::new(0.25, 61.0, 0.25);
+        let spawn = safe_spawn_near(blocked, |x, y, z| {
             if y == 60 || (x == 0 && z == 0 && y >= 61) {
                 BlockType::Stone
             } else {
@@ -988,7 +1001,7 @@ mod tests {
             }
         })
         .unwrap();
-        assert_ne!((spawn.x, spawn.z), (0.5, 0.5));
+        assert_ne!((spawn.x, spawn.z), (blocked.x, blocked.z));
         assert_eq!(spawn.y, 61.0);
         assert!(safe_spawn_near(Vec3::ZERO, |_, _, _| BlockType::Air).is_none());
     }
@@ -1007,7 +1020,7 @@ mod tests {
 
     #[test]
     fn surface_spawn_searches_for_land_instead_of_an_underwater_cave() {
-        let spawn = surface_spawn_near(Vec3::new(0.5, 150.0, 0.5), |x, y, _| {
+        let spawn = surface_spawn_near(Vec3::new(0.25, 150.0, 0.25), |x, y, _| {
             if y <= 60 || (64..=125).contains(&y) {
                 return BlockType::Stone;
             }
@@ -1017,13 +1030,13 @@ mod tests {
             BlockType::Air
         })
         .unwrap();
-        assert_eq!(spawn.x, 1.5);
+        assert_eq!(spawn.x, block_center_x(1));
         assert_eq!(spawn.y, 126.0);
     }
 
     #[test]
     fn ocean_spawn_falls_back_to_the_water_surface() {
-        let spawn = surface_spawn_near(Vec3::new(0.5, 150.0, 0.5), |_, y, _| {
+        let spawn = surface_spawn_near(Vec3::new(0.25, 150.0, 0.25), |_, y, _| {
             if y <= 124 {
                 BlockType::Water
             } else {
@@ -1031,7 +1044,7 @@ mod tests {
             }
         })
         .unwrap();
-        assert_eq!(spawn, Vec3::new(0.5, 125.0, 0.5));
+        assert_eq!(spawn, Vec3::new(0.25, 125.0, 0.25));
     }
 
     #[test]
@@ -1039,11 +1052,16 @@ mod tests {
         let mut chunk = crate::chunk::Chunk::new(2, 2, -112651535689168126i64 as u64);
         chunk.generate();
         assert_eq!(chunk.get_block(0, 123, 0), BlockType::Water);
+        let origin = 2 * crate::chunk::CHUNK_WIDTH as i32;
+        let span = crate::chunk::CHUNK_WIDTH as i32;
         let spawn = surface_spawn_near(Vec3::new(32.5, 150.0, 32.5), |x, y, z| {
-            if !(32..48).contains(&x) || !(32..48).contains(&z) || !(0..256).contains(&y) {
+            if !(origin..origin + span).contains(&x)
+                || !(origin..origin + span).contains(&z)
+                || !(0..256).contains(&y)
+            {
                 return BlockType::Air;
             }
-            chunk.get_block((x - 32) as usize, y as usize, (z - 32) as usize)
+            chunk.get_block((x - origin) as usize, y as usize, (z - origin) as usize)
         })
         .unwrap();
         assert!(spawn.y >= 124.0, "spawned underground at {spawn:?}");
@@ -1079,7 +1097,7 @@ mod tests {
         world.set_block(10, 64, 10, BlockType::Cactus);
         let mut player = Player::new(65.0);
         // Position player touching cactus
-        player.position = Vec3::new(10.5, 65.0, 10.5);
+        player.position = Vec3::new(block_center_x(10), 65.0, block_center_z(10));
         player.health = 20;
         player.sandbox = false;
         player.damage_cooldown = 0.0;
@@ -1106,7 +1124,7 @@ mod tests {
         world.set_block(10, 63, 10, BlockType::Sand);
         world.set_block(10, 64, 10, BlockType::Cactus);
         let mut player = Player::new(65.0);
-        player.position = Vec3::new(10.5, 65.0, 10.5);
+        player.position = Vec3::new(block_center_x(10), 65.0, block_center_z(10));
         player.health = 20;
         player.sandbox = true;
         player.damage_cooldown = 0.0;

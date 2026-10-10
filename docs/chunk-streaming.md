@@ -8,11 +8,15 @@ a time. Save errors retain the outgoing terrain and stop further integration.
 Final world saving waits for that job before writing the current world state.
 
 During play, at most two completed chunks are integrated per update. Integration,
-mesh upload collection and mesh dispatch each yield after a two-millisecond
+mesh upload collection, and mesh dispatch each yield after a two-millisecond
 budget, checked between jobs. A single job can exceed its budget. Initial loading
-retains its larger batches. Terrain generation, save format and view distance
-are unchanged. Under sustained storage pressure, new terrain arrives later while
-movement continues instead of waiting on the database lock.
+still integrates finished terrain without that cap. Mesh uploads and mesh
+dispatch yield while loading too. An uncapped upload builds a GPU buffer for
+every ready chunk before the next present, and half-meter chunks made that pass
+freeze the loading screen. Loading uploads at most 8 finished meshes per update
+and keeps at most 32 mesh jobs in flight. Terrain generation, save format, and
+view distance are unchanged. Under sustained storage pressure, new terrain
+arrives later while movement continues instead of waiting on the database lock.
 
 ## Reproduce the CPU profile
 
