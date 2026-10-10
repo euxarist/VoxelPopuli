@@ -1,4 +1,8 @@
 use super::*;
+use crate::chunk::{
+    block_center_x, block_center_z, block_origin_x, block_origin_z, world_to_block_x,
+    world_to_block_y, world_to_block_z,
+};
 use crate::skeleton_ai::{self, Goal, Target, TargetId};
 
 #[derive(Clone, Copy)]
@@ -35,8 +39,11 @@ impl World {
         if self.day_time >= 600.0 {
             return false;
         }
-        let p = (feet + Vec3::Y * 1.9).floor().as_ivec3();
-        (p.y..CHUNK_HEIGHT as i32).all(|y| !self.get_block(p.x, y, p.z).is_solid())
+        let head = feet + Vec3::Y * 1.9;
+        let px = world_to_block_x(head.x);
+        let py = world_to_block_y(head.y);
+        let pz = world_to_block_z(head.z);
+        (py..CHUNK_HEIGHT as i32).all(|y| !self.get_block(px, y, pz).is_solid())
     }
 
     fn skeleton_sees(&self, from: Vec3, to: Vec3) -> bool {
@@ -51,8 +58,16 @@ impl World {
             .path_goal
             .is_none_or(|p| p.distance_squared(destination) > 2.25);
         if changed || mob.skeleton.path_timer <= 0.0 {
-            let start = mob.position.floor().as_ivec3();
-            let goal = destination.floor().as_ivec3();
+            let start = glam::IVec3::new(
+                world_to_block_x(mob.position.x),
+                world_to_block_y(mob.position.y),
+                world_to_block_z(mob.position.z),
+            );
+            let goal = glam::IVec3::new(
+                world_to_block_x(destination.x),
+                world_to_block_y(destination.y),
+                world_to_block_z(destination.z),
+            );
             let avoid_sun = !self.skeleton_sunlight(mob.position);
             let allow_water =
                 shelter || self.get_block(start.x, start.y, start.z) == BlockType::Water;
@@ -63,11 +78,16 @@ impl World {
                         !self.skeleton_sunlight(p.as_vec3())
                             || self.get_block(p.x, p.y, p.z) == BlockType::Water
                     } else {
-                        (p - goal).as_vec3().length_squared() <= 2.0
+                        let delta = Vec3::new(
+                            block_origin_x(p.x) - block_origin_x(goal.x),
+                            (p.y - goal.y) as f32,
+                            block_origin_z(p.z) - block_origin_z(goal.z),
+                        );
+                        delta.length_squared() <= 2.0
                     }
                 },
                 |p| {
-                    let pos = p.as_vec3() + Vec3::new(0.5, 0.0, 0.5);
+                    let pos = Vec3::new(block_center_x(p.x), p.y as f32, block_center_z(p.z));
                     let floor = self.get_block(p.x, p.y - 1, p.z);
                     (1..CHUNK_HEIGHT as i32 - 2).contains(&p.y)
                         && self
@@ -83,7 +103,17 @@ impl World {
                         && !self.mob_box_blocked(pos, mob.half_width(), mob.height())
                         && (!avoid_sun || !self.skeleton_sunlight(pos))
                 },
-            );
+            )
+            .into_iter()
+            .map(|step| {
+                let block = step.floor().as_ivec3();
+                Vec3::new(
+                    block_center_x(block.x),
+                    block.y as f32,
+                    block_center_z(block.z),
+                )
+            })
+            .collect();
             mob.skeleton.path_goal = Some(destination);
             mob.skeleton.path_timer = 0.5;
         }
@@ -111,8 +141,11 @@ impl World {
         dt: f32,
     ) -> Option<(u32, f32, u32)> {
         let block_at = |p: Vec3| {
-            let p = p.floor().as_ivec3();
-            self.get_block(p.x, p.y, p.z)
+            self.get_block(
+                world_to_block_x(p.x),
+                world_to_block_y(p.y),
+                world_to_block_z(p.z),
+            )
         };
         let in_water = block_at(mob.position + Vec3::Y * 0.05) == BlockType::Water;
         let underwater = block_at(mob.position + Vec3::Y * 1.7) == BlockType::Water;
@@ -384,6 +417,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{CHUNK_DEPTH, CHUNK_WIDTH, world_to_block_x, world_to_block_z};
     fn arena() -> World {
         let mut world = World::simulation(42);
         world.day_time = 900.0;
@@ -403,9 +437,13 @@ mod tests {
     }
     fn put(world: &mut World, x: i32, y: i32, z: i32, block: BlockType) {
         world
-            .get_chunk_mut(x.div_euclid(16), z.div_euclid(16))
+            .get_chunk_mut(
+                x.div_euclid(CHUNK_WIDTH as i32),
+                z.div_euclid(CHUNK_DEPTH as i32),
+            )
             .unwrap()
-            .blocks[x.rem_euclid(16) as usize][y as usize][z.rem_euclid(16) as usize] = block;
+            .blocks[x.rem_euclid(CHUNK_WIDTH as i32) as usize][y as usize]
+            [z.rem_euclid(CHUNK_DEPTH as i32) as usize] = block;
     }
     fn spawn(world: &mut World, position: Vec3) -> u32 {
         let mut mob = Mob::new(MobKind::Skeleton, position, position, 0);
@@ -434,7 +472,13 @@ mod tests {
         let mut world = arena();
         spawn(&mut world, Vec3::new(0.5, 61.0, 0.5));
         for y in 61..65 {
-            put(&mut world, 3, y, 0, BlockType::Stone);
+            put(
+                &mut world,
+                world_to_block_x(3.5),
+                y,
+                world_to_block_z(0.5),
+                BlockType::Stone,
+            );
         }
         world.update_mobs(Vec3::new(6.5, 61.0, 0.5), 0.1, BlockType::Air);
         assert!(world.mobs[0].skeleton.target.is_none());
@@ -482,7 +526,13 @@ mod tests {
         let mut world = arena();
         let id = spawn(&mut world, Vec3::new(0.5, 61.0, 0.5));
         for y in 61..64 {
-            put(&mut world, 0, y, 0, BlockType::Water);
+            put(
+                &mut world,
+                world_to_block_x(0.5),
+                y,
+                world_to_block_z(0.5),
+                BlockType::Water,
+            );
         }
         world.update_mobs(Vec3::new(1.7, 61.0, 0.5), 0.1, BlockType::Air);
         assert!(

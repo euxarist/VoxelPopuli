@@ -36,7 +36,11 @@ impl BeeState {
 }
 
 pub fn center(p: BlockPos) -> Vec3 {
-    Vec3::new(p.0 as f32 + 0.5, p.1 as f32, p.2 as f32 + 0.5)
+    Vec3::new(
+        crate::chunk::block_center_x(p.0),
+        p.1 as f32,
+        crate::chunk::block_center_z(p.2),
+    )
 }
 
 pub fn is_flower(b: crate::block::BlockType) -> bool {

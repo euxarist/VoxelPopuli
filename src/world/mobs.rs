@@ -1,4 +1,8 @@
 use super::*;
+use crate::chunk::{
+    block_center_x, block_center_z, block_origin_x, block_origin_z, world_to_block_x,
+    world_to_block_y, world_to_block_z,
+};
 use crate::mob_catalog::{Temper, can_spawn};
 
 /// Sweep the moving box against another creature, including fast crossings.
@@ -112,9 +116,9 @@ impl World {
     pub(super) fn mob_in_water(&self, pos: Vec3, hw: f32, height: f32) -> bool {
         let min = pos - Vec3::new(hw, 0.0, hw) + Vec3::splat(0.001);
         let max = pos + Vec3::new(hw, height, hw) - Vec3::splat(0.001);
-        for x in min.x.floor() as i32..=max.x.floor() as i32 {
-            for z in min.z.floor() as i32..=max.z.floor() as i32 {
-                for y in min.y.floor() as i32..=max.y.floor() as i32 {
+        for x in world_to_block_x(min.x)..=world_to_block_x(max.x) {
+            for z in world_to_block_z(min.z)..=world_to_block_z(max.z) {
+                for y in world_to_block_y(min.y)..=world_to_block_y(max.y) {
                     let surface = y as f32
                         + crate::chunk::water_render_height(self.get_liquid_level(x, y, z));
                     if self.get_block(x, y, z) != BlockType::Water
@@ -171,18 +175,17 @@ impl World {
         for distance in [4.0, 6.0, 8.0] {
             for offset in [0.0, -2.0, 2.0, -4.0, 4.0] {
                 let center = player + forward * distance + side * offset;
-                let x = center.x.floor() as i32;
-                let z = center.z.floor() as i32;
-                for y in ((player.y as i32 - 8).max(1)
-                    ..=(player.y as i32 + 5).min(CHUNK_HEIGHT as i32 - 5))
-                    .rev()
+                let x = world_to_block_x(center.x);
+                let z = world_to_block_z(center.z);
+                let player_y = world_to_block_y(player.y);
+                for y in ((player_y - 8).max(1)..=(player_y + 5).min(CHUNK_HEIGHT as i32 - 5)).rev()
                 {
-                    let pos = Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5);
+                    let pos = Vec3::new(block_center_x(x), y as f32, block_center_z(z));
                     let supported = self.get_block(x, y - 1, z).is_solid();
                     if matches!(kind.species().motion, Motion::Walk | Motion::Hop) && !supported {
                         continue;
                     }
-                    if kind.species().motion == Motion::Fly && y != player.y as i32 + 2 {
+                    if kind.species().motion == Motion::Fly && y != player_y + 2 {
                         continue;
                     }
                     if kind.species().motion == Motion::Amphibious
@@ -208,8 +211,12 @@ impl World {
         if self.mobs.len() >= MOB_CAP {
             return;
         }
-        let biome =
-            crate::chunk::biome_at_version(x as f32, z as f32, self.seed, self.generator_version);
+        let biome = crate::chunk::biome_at_version(
+            block_origin_x(x),
+            block_origin_z(z),
+            self.seed,
+            self.generator_version,
+        );
         for y in (55..CHUNK_HEIGHT as i32 - 5).rev() {
             let floor = self.get_block(x, y, z);
             if floor == BlockType::Air {
@@ -246,13 +253,13 @@ impl World {
                 kind = MobKind::ZombieVillager;
             }
             let pos = Vec3::new(
-                x as f32 + 0.5,
+                block_center_x(x),
                 if water {
                     y as f32 - kind.species().height - 0.5
                 } else {
                     y as f32 + 1.0
                 },
-                z as f32 + 0.5,
+                block_center_z(z),
             );
             let _ = self.spawn_mob(kind, pos, (random >> 16) as u8);
             return;
@@ -274,7 +281,14 @@ impl World {
                     for (y, row) in column.iter().enumerate().skip(1) {
                         let block = row[z];
                         if crate::bee::is_hive(block) {
-                            nests.push(((cx * 16 + x as i32, y as i32, cz * 16 + z as i32), block));
+                            nests.push((
+                                (
+                                    cx * CHUNK_WIDTH as i32 + x as i32,
+                                    y as i32,
+                                    cz * CHUNK_DEPTH as i32 + z as i32,
+                                ),
+                                block,
+                            ));
                         }
                     }
                 }
@@ -335,7 +349,7 @@ impl World {
             if self
                 .spawn_mob(
                     kind,
-                    Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
+                    Vec3::new(block_center_x(x), y as f32, block_center_z(z)),
                     (n >> 16) as u8,
                 )
                 .is_ok()
@@ -351,9 +365,9 @@ impl World {
                     for (z, &block) in row.iter().enumerate() {
                         if block == BlockType::MobSpawner {
                             spawners.push(Vec3::new(
-                                (cx * CHUNK_WIDTH as i32 + x as i32) as f32 + 1.5,
+                                block_origin_x(cx * CHUNK_WIDTH as i32 + x as i32) + 1.5,
                                 y as f32 + 1.0,
-                                (cz * CHUNK_DEPTH as i32 + z as i32) as f32 + 0.5,
+                                block_center_z(cz * CHUNK_DEPTH as i32 + z as i32),
                             ));
                         }
                     }
@@ -374,8 +388,8 @@ mod collision_tests {
     fn pool() -> World {
         let mut world = World::simulation(42);
         let mut chunk = Chunk::new(0, 0, 42);
-        for x in 0..16 {
-            for z in 0..16 {
+        for x in 0..32 {
+            for z in 0..32 {
                 chunk.set_block(x, 59, z, BlockType::Stone);
                 for y in 60..64 {
                     chunk.set_block(x, y, z, BlockType::Water);
@@ -426,7 +440,7 @@ mod collision_tests {
     fn shallow_flow_does_not_count_as_full_water() {
         let mut world = pool();
         world.set_liquid_level(8, 63, 8, 8);
-        assert!(!world.mob_in_water(Vec3::new(8.5, 63.5, 8.5), 0.2, 0.3));
+        assert!(!world.mob_in_water(Vec3::new(4.25, 63.5, 4.25), 0.2, 0.3));
     }
 
     #[test]
@@ -439,8 +453,8 @@ mod collision_tests {
             let mut world = pool();
             let pos = Vec3::new(8.0, 62.0, 8.0);
             world.mobs.push(Mob::new(kind, pos, pos, 0));
-            for x in 0..16 {
-                for z in 0..16 {
+            for x in 0..32 {
+                for z in 0..32 {
                     for y in 60..64 {
                         world.set_block(x, y, z, BlockType::Air);
                     }
@@ -462,8 +476,8 @@ mod collision_tests {
             .filter(|k| k.species().motion == Motion::Swim)
         {
             let mut world = pool();
-            for x in 10..16 {
-                for z in 0..16 {
+            for x in 20..32 {
+                for z in 0..32 {
                     for y in 60..64 {
                         world.set_block(x, y, z, BlockType::Air);
                     }

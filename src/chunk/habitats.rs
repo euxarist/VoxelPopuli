@@ -176,8 +176,8 @@ pub(super) fn decorate(chunk: &mut Chunk) {
     let biomes: [[Biome; CHUNK_DEPTH]; CHUNK_WIDTH] = std::array::from_fn(|x| {
         std::array::from_fn(|z| {
             biome_at(
-                (chunk.x * 16 + x as i32) as f32,
-                (chunk.z * 16 + z as i32) as f32,
+                column_meters_x(chunk.x, x as i32),
+                column_meters_z(chunk.z, z as i32),
                 chunk.seed,
             )
         })
@@ -206,7 +206,7 @@ pub(super) fn decorate(chunk: &mut Chunk) {
         }
     }
     let mut rng = ChunkRng::new(chunk.seed, chunk.x, chunk.z, 0x48414249544154);
-    let attempts = match biomes[8][8] {
+    let attempts = match biomes[CHUNK_WIDTH / 2][CHUNK_DEPTH / 2] {
         Biome::Meadow => 1,
         Biome::SunflowerPlains => 2,
         _ => 24,

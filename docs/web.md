@@ -43,10 +43,11 @@ left/right click to mine/place, E for inventory, 1–9 for the hotbar, and Esc
 to release the mouse and pause. Standard-mapped gamepads are supported during
 play. Use **Fullscreen** or F11 to expand the game.
 
-Worlds persist in IndexedDB in the current browser using VoxelPopuli's version 8
-save format with the historical 16-bit block/item layout and an explicit graphics
-preset extension. Versions 1-7 remain readable. Old Fancy settings become High;
-old Fast settings remain Fast. Older binaries cannot read newly written version 8
+Worlds persist in IndexedDB in the current browser using VoxelPopuli's version 9
+save format. Blocks are 0.5 by 1 by 0.5 meters. The format keeps the 16-bit
+block/item layout and the graphics preset extension. Versions 1-8 remain readable
+and double block X and Z on load. Old Fancy settings become High; old Fast
+settings remain Fast. Older binaries cannot read newly written version 9
 records. Existing
 worlds keep their original terrain generator; new worlds get the additional
 [bee habitats and trees](world-generation.md). Desktop

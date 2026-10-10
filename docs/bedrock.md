@@ -42,12 +42,18 @@ intentionally overwritten. Browser saves continue using the existing browser for
 - Crafting cursors, settings, and other engine bookkeeping use an additional
   `voxelpopuli:session` database record. Minecraft ignores that record. Version 8
   preserves the historical layout and adds the Cinematic/High/Fast graphics
-  preset. Versions 1-7 load with Fancy migrated to High and Fast unchanged.
-  Older VoxelPopuli binaries cannot read newly written version 8 records.
+  preset. Version 9 keeps that preset. Versions 1-7 load with Fancy migrated to
+  High and Fast unchanged. Versions 1-8 scale block X and Z so an old index stays
+  on the same meter. Older VoxelPopuli binaries cannot read newly written version
+  9 records.
   See [quality settings and migration](rendering.md).
 - Native actor interchange and dimension travel are still under implementation.
   Existing unknown actor records remain in storage; engine-specific entity state
   currently remains in the extra session record.
+- Newly written terrain subchunks stay 16 by 16 by 16: one Bedrock block per meter,
+  the minimum corner of each 2 by 2 cell. The full 0.5 by 1 by 0.5 meter grid is
+  stored beside them in the `voxelpopuli:blocks` record. A chunk saved before that
+  record expands each subchunk cell into all four blocks on load.
 - Newly explored chunks use VoxelPopuli terrain generation. Minecraft can generate
   different terrain beyond the saved area; sharing a seed does not imply terrain parity.
   The world's generator version is preserved during save and migration. New worlds

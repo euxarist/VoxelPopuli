@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     bedrock::{records as n, session::WorldStore},
+    chunk::{CHUNK_DEPTH, CHUNK_WIDTH, chunk_of_world_x, chunk_of_world_z},
     java_compat::NbtTag,
 };
 
@@ -57,23 +58,26 @@ impl GameSave {
                 std::collections::BTreeMap::<(i32, i32), Vec<((i32, i32, i32), BlockType)>>::new();
             let position = self.player.position;
             chunks
-                .entry((
-                    (position.x.floor() as i32).div_euclid(16),
-                    (position.z.floor() as i32).div_euclid(16),
-                ))
+                .entry((chunk_of_world_x(position.x), chunk_of_world_z(position.z)))
                 .or_default();
             for &(position, block) in &self.edits {
                 if !(0..256).contains(&position.1) {
                     return Err(n::invalid("Legacy edit outside supported terrain height"));
                 }
                 chunks
-                    .entry((position.0.div_euclid(16), position.2.div_euclid(16)))
+                    .entry((
+                        position.0.div_euclid(CHUNK_WIDTH as i32),
+                        position.2.div_euclid(CHUNK_DEPTH as i32),
+                    ))
                     .or_default()
                     .push((position, block));
             }
             for &((x, _, z), _) in &self.containers {
                 chunks
-                    .entry((x.div_euclid(16), z.div_euclid(16)))
+                    .entry((
+                        x.div_euclid(CHUNK_WIDTH as i32),
+                        z.div_euclid(CHUNK_DEPTH as i32),
+                    ))
                     .or_default();
             }
             for ((x, z), edits) in chunks {
@@ -91,9 +95,9 @@ impl GameSave {
                 });
                 for ((x, y, z), block) in edits {
                     chunk.set_block(
-                        x.rem_euclid(16) as usize,
+                        x.rem_euclid(CHUNK_WIDTH as i32) as usize,
                         y as usize,
-                        z.rem_euclid(16) as usize,
+                        z.rem_euclid(CHUNK_DEPTH as i32) as usize,
                         block,
                     );
                 }
@@ -161,8 +165,18 @@ impl GameSave {
         } else {
             let mut player =
                 Player::new(n::number(store.metadata.get("SpawnY")).unwrap_or(160.0) as f32);
-            player.position.x = n::number(store.metadata.get("SpawnX")).unwrap_or(0.0) as f32 + 0.5;
-            player.position.z = n::number(store.metadata.get("SpawnZ")).unwrap_or(0.0) as f32 + 0.5;
+            let spawn_x = n::number(store.metadata.get("SpawnX")).unwrap_or(0.0) as i32;
+            let spawn_z = n::number(store.metadata.get("SpawnZ")).unwrap_or(0.0) as i32;
+            if matches!(
+                store.metadata.get("voxelpopuli:block_spawn"),
+                Some(NbtTag::Int(1))
+            ) {
+                player.position.x = crate::chunk::block_center_x(spawn_x);
+                player.position.z = crate::chunk::block_center_z(spawn_z);
+            } else {
+                player.position.x = spawn_x as f32 + 0.5;
+                player.position.z = spawn_z as f32 + 0.5;
+            }
             let mut world = World::simulation(store.seed);
             if let Some(NbtTag::Long(ticks)) = store.metadata.get("Time") {
                 let ticks = (*ticks).max(0) as u64;
@@ -399,7 +413,10 @@ impl GameSave {
             .collect();
         let edits: std::collections::HashMap<_, _> = self.edits.iter().copied().collect();
         for &(x, _, z) in containers.keys().chain(edits.keys()) {
-            affected.insert((x.div_euclid(16), z.div_euclid(16)));
+            affected.insert((
+                x.div_euclid(CHUNK_WIDTH as i32),
+                z.div_euclid(CHUNK_DEPTH as i32),
+            ));
         }
         for (x, z) in affected {
             let key = crate::bedrock::palette::chunk_key(x, z, 0, 0x31, None);
@@ -428,8 +445,8 @@ impl GameSave {
                 merged.extend_from_slice(&n::encode(&record)?);
             }
             for (&position, container) in &containers {
-                if position.0.div_euclid(16) == x
-                    && position.2.div_euclid(16) == z
+                if position.0.div_euclid(CHUNK_WIDTH as i32) == x
+                    && position.2.div_euclid(CHUNK_DEPTH as i32) == z
                     && !written.contains(&position)
                 {
                     let mut record = NbtTag::Compound(vec![]);
@@ -478,7 +495,7 @@ mod tests {
         assert!(save.migrate_to_bedrock(&destination).is_err());
         let store = WorldStore::open(&destination).unwrap();
         assert_eq!(
-            store.read_chunk(-2, -1, 0).unwrap().unwrap().blocks[15][80][15],
+            store.read_chunk(-1, -1, 0).unwrap().unwrap().blocks[15][80][31],
             BlockType::DiamondOre
         );
         assert!(GameSave::read_bedrock(&store).unwrap().edits.is_empty());

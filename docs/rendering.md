@@ -60,18 +60,19 @@ This verifies that defect, not the entire remaster or its performance budget.
 
 ## Settings migration
 
-Browser saves and native `voxelpopuli:session` records use save version 8. The
+Browser saves and native `voxelpopuli:session` records use save version 9. The
 version-7 field layout remains unchanged, including the historical Fancy boolean,
 16-bit block/item IDs, terrain generator ID, and day counter. Version 8 declares
 its new format in the header and adds one required graphics preset byte after the
-day counter: Cinematic = 0, High = 1, Fast = 2.
+day counter: Cinematic = 0, High = 1, Fast = 2. Version 9 keeps that byte and
+scales block X and Z from older files onto the half-meter grid.
 
-Versions 1-7 remain readable. Their Fancy setting maps to High, not the new desktop
+Versions 1-8 remain readable. Their Fancy setting maps to High, not the new desktop
 Cinematic default; Fast remains Fast. Missing, invalid, truncated, or unversioned
 preset extensions are rejected. UI changes survive native save/reopen and browser
 save/reload through the same versioned settings codec. This does not alter native
 Minecraft terrain or player record layouts. Older VoxelPopuli binaries cannot read
-new version-8 records. Keep a backup before moving a save between game versions.
+new version-9 records. Keep a backup before moving a save between game versions.
 
 ## Code-only verification
 

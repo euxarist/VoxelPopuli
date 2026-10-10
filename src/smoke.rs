@@ -960,7 +960,12 @@ pub fn habitats() -> Result<(), String> {
         'search: for x in -64..64 {
             for z in -64..64 {
                 let (cx, cz) = (x * 6, z * 6);
-                if crate::chunk::biome_at((cx * 16 + 8) as f32, (cz * 16 + 8) as f32, 42) != biome {
+                if crate::chunk::biome_at(
+                    cx as f32 * crate::chunk::CHUNK_SPAN_X + crate::chunk::CHUNK_SPAN_X * 0.5,
+                    cz as f32 * crate::chunk::CHUNK_SPAN_Z + crate::chunk::CHUNK_SPAN_Z * 0.5,
+                    42,
+                ) != biome
+                {
                     continue;
                 }
                 let mut chunk = Chunk::new(cx, cz, 42);
@@ -1386,9 +1391,9 @@ fn verify_mob_simulation() {
     let cod = world.mobs.iter().find(|m| m.kind == MobKind::Cod).unwrap();
     assert_eq!(
         world.get_block(
-            cod.position.x.floor() as i32,
-            cod.position.y.floor() as i32,
-            cod.position.z.floor() as i32
+            crate::chunk::world_to_block_x(cod.position.x),
+            crate::chunk::world_to_block_y(cod.position.y),
+            crate::chunk::world_to_block_z(cod.position.z)
         ),
         BlockType::Water,
         "fish escaped the pond"

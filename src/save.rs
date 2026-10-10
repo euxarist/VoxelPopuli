@@ -15,7 +15,7 @@ mod bees;
 pub use bees::BeeSaveData;
 
 const MAGIC: &[u8; 8] = b"VPOPSAV\0";
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 const MAX_EDITS: usize = 10_000_000;
 const MAX_CONTAINERS: usize = 100_000;
 const MAX_PENDING_STACKS: usize = 1_000_000;
@@ -654,7 +654,7 @@ impl GameSave {
                 });
             }
         }
-        let bees = if version >= 5 {
+        let mut bees = if version >= 5 {
             BeeSaveData::decode(&mut reader)?
         } else {
             BeeSaveData::default()
@@ -672,6 +672,32 @@ impl GameSave {
         }
         if reader.remaining() != 0 {
             return Err(invalid("trailing data in save file"));
+        }
+        if version < 9 {
+            // Old block indices were also meters. The new grid has two blocks
+            // per meter on X and Z, so an edit stays on the same meter at index * 2.
+            for (position, _) in &mut edits {
+                position.0 *= 2;
+                position.2 *= 2;
+            }
+            for (position, _) in &mut containers {
+                position.0 *= 2;
+                position.2 *= 2;
+            }
+            for (position, _) in &mut bees.hives {
+                position.0 *= 2;
+                position.2 *= 2;
+            }
+            for bee in &mut bees.bees {
+                if let Some(position) = bee.state.hive.as_mut() {
+                    position.0 *= 2;
+                    position.2 *= 2;
+                }
+                if let Some(position) = bee.state.flower.as_mut() {
+                    position.0 *= 2;
+                    position.2 *= 2;
+                }
+            }
         }
         Ok(Self {
             generator_version,
@@ -991,7 +1017,10 @@ mod tests {
                 selected_skin: 2,
             },
             import_world: Some(PathBuf::from("example-world")),
-            edits: vec![((1, 2, 3), BlockType::Torch), ((-4, 60, 8), BlockType::Air)],
+            edits: vec![
+                ((2, 2, 6), BlockType::Torch),
+                ((-8, 60, 16), BlockType::Air),
+            ],
             containers: Vec::new(),
             cursor: None,
             crafting: [None; 9],
@@ -1021,9 +1050,9 @@ mod tests {
     }
 
     #[test]
-    fn graphics_settings_use_explicit_version_eight_extension() {
+    fn graphics_settings_use_explicit_version_nine_extension() {
         let bytes = sample_save().encode().unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 8);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 9);
         assert_eq!(bytes.last(), Some(&2));
     }
 
@@ -1107,7 +1136,48 @@ mod tests {
         assert_eq!(loaded.settings.graphics_quality, GraphicsQuality::High);
         assert_eq!(loaded.player, save.player);
         assert_eq!(loaded.inventory, save.inventory);
-        assert_eq!(loaded.edits, save.edits);
+        assert_eq!(
+            loaded.edits,
+            vec![
+                ((4, 2, 12), BlockType::Torch),
+                ((-16, 60, 32), BlockType::Air),
+            ]
+        );
+    }
+
+    #[test]
+    fn version_eight_block_positions_scale_onto_the_half_meter_grid() {
+        let mut save = sample_save();
+        save.edits = vec![((3, 70, -5), BlockType::Torch)];
+        save.containers
+            .push(((3, 70, -5), Container::new(BlockType::Chest).unwrap()));
+        save.bees.hives.push(((3, 70, -5), 2));
+        save.bees.bees.push(bees::SavedBee {
+            position: Vec3::new(1.25, 71.0, -2.5),
+            home: Vec3::new(4.0, 71.0, 8.0),
+            health: 10.0,
+            growth: 0.0,
+            love: 0.0,
+            cooldown: 0.0,
+            anger: 0.0,
+            state: crate::bee::BeeState {
+                hive: Some((3, 70, -5)),
+                flower: Some((-2, 71, 9)),
+                ..Default::default()
+            },
+        });
+        let mut bytes = save.encode().unwrap();
+        bytes[8..12].copy_from_slice(&8u32.to_le_bytes());
+        let loaded = GameSave::decode(&bytes).unwrap();
+        assert_eq!(loaded.edits, vec![((6, 70, -10), BlockType::Torch)]);
+        assert_eq!(loaded.containers[0].0, (6, 70, -10));
+        assert_eq!(loaded.bees.hives, vec![((6, 70, -10), 2)]);
+        assert_eq!(loaded.bees.bees[0].state.hive, Some((6, 70, -10)));
+        assert_eq!(loaded.bees.bees[0].state.flower, Some((-4, 71, 18)));
+        assert_eq!(loaded.bees.bees[0].position, save.bees.bees[0].position);
+        assert_eq!(loaded.bees.bees[0].home, save.bees.bees[0].home);
+        assert_eq!(loaded.player.position, save.player.position);
+        assert_eq!(loaded.player.spawn_point, save.player.spawn_point);
     }
 
     #[test]
@@ -1328,7 +1398,7 @@ mod tests {
         put_stack(&mut encoded, Some(ItemStack::new(BlockType::Stone, 1))).unwrap();
         assert_eq!(encoded.len(), 8);
         assert_eq!(&encoded[1..3], &(BlockType::Stone as u16).to_le_bytes());
-        assert_eq!(VERSION, 8);
+        assert_eq!(VERSION, 9);
         assert_eq!(std::mem::size_of::<BlockType>(), 2);
     }
 

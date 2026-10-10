@@ -151,9 +151,9 @@ mod habitat_regression {
             }
         }
         for (x, z, expected) in [
-            (0, 0, 0x674219705672d009),
-            (-80, 43, 0x02457944ec1f5138),
-            (32, -51, 0x5bcde24ab624c63b),
+            (0, 0, 0x51cc5307b2c0b391),
+            (-80, 43, 0xe6d4b8861a2c03a3),
+            (32, -51, 0xf0ae2d129d0dd9eb),
         ] {
             let mut chunk = Chunk::new(x, z, 42);
             chunk.generator_version = GeneratorVersion::Legacy;
@@ -264,12 +264,111 @@ impl ChunkRng {
     }
 }
 
-pub const CHUNK_WIDTH: usize = 16;
+pub const CHUNK_WIDTH: usize = 32;
 pub const CHUNK_HEIGHT: usize = 256;
-pub const CHUNK_DEPTH: usize = 16;
+pub const CHUNK_DEPTH: usize = 32;
+/// Horizontal blocks are half a meter wide. Height stays one meter.
+pub const BLOCK_SIZE_X: f32 = 0.5;
+pub const BLOCK_SIZE_Y: f32 = 1.0;
+pub const BLOCK_SIZE_Z: f32 = 0.5;
+/// A chunk still covers 16 by 16 meters, so view distance in meters is unchanged.
+pub const CHUNK_SPAN_X: f32 = CHUNK_WIDTH as f32 * BLOCK_SIZE_X;
+pub const CHUNK_SPAN_Y: f32 = CHUNK_HEIGHT as f32 * BLOCK_SIZE_Y;
+pub const CHUNK_SPAN_Z: f32 = CHUNK_DEPTH as f32 * BLOCK_SIZE_Z;
 pub const WATER_VERTEX_ALPHA: u8 = 216;
 const SEA_LEVEL: usize = 124;
 const MAX_TERRAIN_HEIGHT: i32 = CHUNK_HEIGHT as i32 - 18;
+
+#[inline]
+pub fn world_to_block_x(x: f32) -> i32 {
+    (x / BLOCK_SIZE_X).floor() as i32
+}
+
+#[inline]
+pub fn world_to_block_y(y: f32) -> i32 {
+    (y / BLOCK_SIZE_Y).floor() as i32
+}
+
+#[inline]
+pub fn world_to_block_z(z: f32) -> i32 {
+    (z / BLOCK_SIZE_Z).floor() as i32
+}
+
+#[inline]
+pub fn block_origin_x(block_x: i32) -> f32 {
+    block_x as f32 * BLOCK_SIZE_X
+}
+
+#[inline]
+pub fn block_origin_y(block_y: i32) -> f32 {
+    block_y as f32 * BLOCK_SIZE_Y
+}
+
+#[inline]
+pub fn block_origin_z(block_z: i32) -> f32 {
+    block_z as f32 * BLOCK_SIZE_Z
+}
+
+#[inline]
+pub fn block_center_x(block_x: i32) -> f32 {
+    (block_x as f32 + 0.5) * BLOCK_SIZE_X
+}
+
+#[inline]
+pub fn block_center_y(block_y: i32) -> f32 {
+    (block_y as f32 + 0.5) * BLOCK_SIZE_Y
+}
+
+#[inline]
+pub fn block_center_z(block_z: i32) -> f32 {
+    (block_z as f32 + 0.5) * BLOCK_SIZE_Z
+}
+
+#[inline]
+pub fn chunk_of_world_x(x: f32) -> i32 {
+    world_to_block_x(x).div_euclid(CHUNK_WIDTH as i32)
+}
+
+#[inline]
+pub fn chunk_of_world_z(z: f32) -> i32 {
+    world_to_block_z(z).div_euclid(CHUNK_DEPTH as i32)
+}
+
+#[inline]
+pub fn column_meters_x(chunk_x: i32, local_x: i32) -> f32 {
+    (chunk_x * CHUNK_WIDTH as i32 + local_x) as f32 * BLOCK_SIZE_X
+}
+
+#[inline]
+pub fn column_meters_z(chunk_z: i32, local_z: i32) -> f32 {
+    (chunk_z * CHUNK_DEPTH as i32 + local_z) as f32 * BLOCK_SIZE_Z
+}
+
+/// Heap-fill a chunk grid. `Box::new` of the nested array builds it on the
+/// stack first, and a 32×256×32 grid of blocks is 512 KiB.
+fn boxed_grid<T: Copy>(fill: T) -> Box<[[[T; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> {
+    const {
+        assert!(
+            std::mem::size_of::<[[[T; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>()
+                == CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH * std::mem::size_of::<T>()
+        );
+        assert!(
+            std::mem::align_of::<[[[T; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>()
+                == std::mem::align_of::<T>()
+        );
+    }
+    let cells = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH;
+    let mut values = Vec::with_capacity(cells);
+    values.resize(cells, fill);
+    let mut slice = values.into_boxed_slice();
+    let ptr = slice
+        .as_mut_ptr()
+        .cast::<[[[T; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>();
+    // The slice and the nested array have the same size and alignment, so the
+    // allocation can be dropped as the array.
+    std::mem::forget(slice);
+    unsafe { Box::from_raw(ptr) }
+}
 
 pub(crate) fn terrain_height_and_biome(world_x: f32, world_z: f32, seed: u64) -> (usize, Biome) {
     let biome = get_biome_seeded(world_x, world_z, seed);
@@ -416,8 +515,8 @@ fn compute_lighting(
     blocks: &[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
     light: &mut [[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
 ) {
-    let mut sky = [[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH];
-    let mut block_light = [[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH];
+    let mut sky = boxed_grid(0u8);
+    let mut block_light = boxed_grid(0u8);
 
     // PASS 1: Skylight top-down
     for x in 0..CHUNK_WIDTH {
@@ -608,7 +707,7 @@ impl MeshSnapshot {
         };
 
         // Fast path: the dz=0 neighbor row (west/center/east) contributes a
-        // full 16-wide run of contiguous z values at every (bx, y), matching
+        // full chunk-wide run of contiguous z values at every (bx, y), matching
         // storage's z-innermost layout, so it can be bulk-copied with slice
         // copies instead of per-element assignment. This is the dominant
         // share of the snapshot (the center chunk alone is ~79% of it).
@@ -772,9 +871,9 @@ impl Chunk {
         Self {
             generator_version: GeneratorVersion::Habitats,
             render_revision: next_render_revision(),
-            blocks: Box::new([[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]),
-            light: Box::new([[[0; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]),
-            liquid_levels: Box::new([[[0; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]),
+            blocks: boxed_grid(BlockType::Air),
+            light: boxed_grid(0),
+            liquid_levels: boxed_grid(0),
             mesh_opaque: None,
             mesh_transparent: None,
             mesh_water: None,
@@ -822,8 +921,8 @@ impl Chunk {
         }
     }
 
-    /// Flat byte views of blocks/light/liquid, in `x*4096 + y*16 + z` order,
-    /// for uploading to the GPU voxel pool (see hashed-splashing-haven plan).
+    /// Flat byte views of blocks/light/liquid, in `x*(HEIGHT*DEPTH) + y*DEPTH + z`
+    /// order, for uploading to the GPU voxel pool.
     pub fn gpu_bytes(&self) -> (&[u8], &[u8], &[u8]) {
         const N: usize = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH;
         // SAFETY: BlockType is #[repr(u16)] and Copy; light/liquid_levels are
@@ -932,14 +1031,11 @@ impl Chunk {
     fn generate_biome_decorations(&mut self) {
         for x in 1..CHUNK_WIDTH - 1 {
             for z in 1..CHUNK_DEPTH - 1 {
-                let world_x = self.x * CHUNK_WIDTH as i32 + x as i32;
-                let world_z = self.z * CHUNK_DEPTH as i32 + z as i32;
-                let biome = biome_at_version(
-                    world_x as f32,
-                    world_z as f32,
-                    self.seed,
-                    self.generator_version,
-                );
+                let block_x = self.x * CHUNK_WIDTH as i32 + x as i32;
+                let block_z = self.z * CHUNK_DEPTH as i32 + z as i32;
+                let world_x = block_x as f32 * BLOCK_SIZE_X;
+                let world_z = block_z as f32 * BLOCK_SIZE_Z;
+                let biome = biome_at_version(world_x, world_z, self.seed, self.generator_version);
                 let Some(surface_y) = self.surface_y(x, z) else {
                     continue;
                 };
@@ -947,9 +1043,9 @@ impl Chunk {
                 if biome == Biome::Desert
                     && self.blocks[x][surface_y][z] == BlockType::Sand
                     && self.blocks[x][surface_y + 1][z] == BlockType::Air
-                    && hash_unit(self.seed, world_x, world_z, 8101) < 0.018
+                    && hash_unit(self.seed, block_x, block_z, 8101) < 0.018
                 {
-                    let height = 2 + (chunk_hash(self.seed, world_x, world_z, 8102) % 2) as usize;
+                    let height = 2 + (chunk_hash(self.seed, block_x, block_z, 8102) % 2) as usize;
                     for h in 1..=height {
                         if surface_y + h < CHUNK_HEIGHT
                             && self.blocks[x][surface_y + h][z] == BlockType::Air
@@ -970,7 +1066,7 @@ impl Chunk {
                 if near_water
                     && (116..=126).contains(&surface_y)
                     && self.blocks[x][surface_y][z] == BlockType::Sand
-                    && hash_unit(self.seed, world_x, world_z, 8201) < 0.35
+                    && hash_unit(self.seed, block_x, block_z, 8201) < 0.35
                 {
                     self.blocks[x][surface_y][z] = BlockType::Clay;
                 }
@@ -984,8 +1080,8 @@ impl Chunk {
         // PASS 1: Terrain (biome-aware)
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                let world_x = (self.x * CHUNK_WIDTH as i32 + x as i32) as f32;
-                let world_z = (self.z * CHUNK_DEPTH as i32 + z as i32) as f32;
+                let world_x = column_meters_x(self.x, x as i32);
+                let world_z = column_meters_z(self.z, z as i32);
                 let (height, _) = terrain_height_and_biome(world_x, world_z, self.seed);
                 let biome = biome_at_version(world_x, world_z, self.seed, self.generator_version);
 
@@ -1134,11 +1230,11 @@ impl Chunk {
                     let cave_seed = base_seed.wrapping_add((i * 9283711) as u64);
 
                     let start_x =
-                        (neighbor_x * CHUNK_WIDTH as i32) as f32 + cave_rng(cave_seed) * 16.0;
+                        neighbor_x as f32 * CHUNK_SPAN_X + cave_rng(cave_seed) * CHUNK_SPAN_X;
                     let depth_roll = cave_rng(cave_seed.wrapping_add(1));
                     let start_y = 8.0 + depth_roll * depth_roll * 86.0;
-                    let start_z = (neighbor_z * CHUNK_DEPTH as i32) as f32
-                        + cave_rng(cave_seed.wrapping_add(2)) * 16.0;
+                    let start_z = neighbor_z as f32 * CHUNK_SPAN_Z
+                        + cave_rng(cave_seed.wrapping_add(2)) * CHUNK_SPAN_Z;
 
                     let mut length = cave_rng(cave_seed.wrapping_add(3)) * 82.0 + 18.0; // 18 to 100 steps
                     let mut radius = cave_rng(cave_seed.wrapping_add(4)) * 1.35 + 1.0; // 1.0 to 2.35 base radius
@@ -1171,23 +1267,21 @@ impl Chunk {
                         let rad = radius * (0.65 + taper * 0.70);
 
                         // Carve the sphere at the current point
-                        let min_cx =
-                            ((current_x - rad).floor() as i32) - (self.x * CHUNK_WIDTH as i32);
-                        let max_cx =
-                            ((current_x + rad).ceil() as i32) - (self.x * CHUNK_WIDTH as i32);
+                        let origin_x = self.x * CHUNK_WIDTH as i32;
+                        let origin_z = self.z * CHUNK_DEPTH as i32;
+                        let min_cx = world_to_block_x(current_x - rad) - origin_x;
+                        let max_cx = ((current_x + rad) / BLOCK_SIZE_X).ceil() as i32 - origin_x;
                         let min_cy = (current_y - rad).floor() as i32;
                         let max_cy = (current_y + rad).ceil() as i32;
-                        let min_cz =
-                            ((current_z - rad).floor() as i32) - (self.z * CHUNK_DEPTH as i32);
-                        let max_cz =
-                            ((current_z + rad).ceil() as i32) - (self.z * CHUNK_DEPTH as i32);
+                        let min_cz = world_to_block_z(current_z - rad) - origin_z;
+                        let max_cz = ((current_z + rad) / BLOCK_SIZE_Z).ceil() as i32 - origin_z;
 
                         for bx in min_cx.max(0)..=max_cx.min(CHUNK_WIDTH as i32 - 1) {
                             for by in min_cy.max(0)..=max_cy.min(CHUNK_HEIGHT as i32 - 1) {
                                 for bz in min_cz.max(0)..=max_cz.min(CHUNK_DEPTH as i32 - 1) {
-                                    let global_x = (self.x * CHUNK_WIDTH as i32 + bx) as f32;
+                                    let global_x = (origin_x + bx) as f32 * BLOCK_SIZE_X;
                                     let global_y = by as f32;
-                                    let global_z = (self.z * CHUNK_DEPTH as i32 + bz) as f32;
+                                    let global_z = (origin_z + bz) as f32 * BLOCK_SIZE_Z;
 
                                     let vertical_scale = if current_y > 64.0 { 1.9 } else { 1.35 };
                                     let dist_sq = (global_x - current_x).powi(2)
@@ -1284,8 +1378,8 @@ impl Chunk {
         let mut tree_positions: Vec<(usize, usize)> = Vec::new();
 
         let (tree_attempts, min_dist) = match get_biome_seeded(
-            (self.x * CHUNK_WIDTH as i32 + 8) as f32,
-            (self.z * CHUNK_DEPTH as i32 + 8) as f32,
+            self.x as f32 * CHUNK_SPAN_X + CHUNK_SPAN_X * 0.5,
+            self.z as f32 * CHUNK_SPAN_Z + CHUNK_SPAN_Z * 0.5,
             self.seed,
         ) {
             Biome::Plains | Biome::HighHills => (2, 4),
@@ -1311,10 +1405,12 @@ impl Chunk {
                 continue;
             }
 
-            let world_x = (self.x * CHUNK_WIDTH as i32 + x as i32) as f32;
-            let world_z = (self.z * CHUNK_DEPTH as i32 + z as i32) as f32;
+            let block_x = self.x * CHUNK_WIDTH as i32 + x as i32;
+            let block_z = self.z * CHUNK_DEPTH as i32 + z as i32;
+            let world_x = block_x as f32 * BLOCK_SIZE_X;
+            let world_z = block_z as f32 * BLOCK_SIZE_Z;
             let biome = biome_at_version(world_x, world_z, self.seed, self.generator_version);
-            let seed = chunk_hash(self.seed, world_x as i32, world_z as i32, 8301 + i) as i32;
+            let seed = chunk_hash(self.seed, block_x, block_z, 8301 + i) as i32;
 
             // Find surface
             let mut surface_y = 0;
@@ -1467,8 +1563,8 @@ impl Chunk {
         // PASS 6: Snow layer for snowy biomes
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                let world_x = (self.x * CHUNK_WIDTH as i32 + x as i32) as f32;
-                let world_z = (self.z * CHUNK_DEPTH as i32 + z as i32) as f32;
+                let world_x = column_meters_x(self.x, x as i32);
+                let world_z = column_meters_z(self.z, z as i32);
                 let biome = biome_at_version(world_x, world_z, self.seed, self.generator_version);
                 if biome == Biome::SnowyTundra
                     || biome == Biome::SnowyTaiga
@@ -2572,6 +2668,9 @@ impl ChunkData {
             }
         }
 
+        scale_mesh_horizontal(&mut v_op);
+        scale_mesh_horizontal(&mut v_tr);
+        scale_mesh_horizontal(&mut v_wa);
         (
             MeshData {
                 v: v_op,
@@ -2592,6 +2691,17 @@ impl ChunkData {
                 c: c_wa,
             },
         )
+    }
+}
+
+/// Vertex emission is in block-index space. Shrink X and Z once so partial
+/// shapes (torches, doors, water) stay the same fraction of the block.
+fn scale_mesh_horizontal(vertices: &mut [f32]) {
+    let mut index = 0;
+    while index + 2 < vertices.len() {
+        vertices[index] *= BLOCK_SIZE_X;
+        vertices[index + 2] *= BLOCK_SIZE_Z;
+        index += 3;
     }
 }
 
@@ -2734,16 +2844,61 @@ pub fn generate_minable_vein(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn quarter_blocks_keep_a_sixteen_meter_chunk() {
+        assert_eq!((CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH), (32, 256, 32));
+        assert_eq!((BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z), (0.5, 1.0, 0.5));
+        assert_eq!((CHUNK_SPAN_X, CHUNK_SPAN_Z), (16.0, 16.0));
+        assert_eq!(world_to_block_x(0.0), 0);
+        assert_eq!(world_to_block_x(0.49), 0);
+        assert_eq!(world_to_block_x(0.5), 1);
+        assert_eq!(world_to_block_z(1.0), 2);
+        assert_eq!(world_to_block_y(1.2), 1);
+        assert_eq!(chunk_of_world_x(15.9), 0);
+        assert_eq!(chunk_of_world_x(16.0), 1);
+        assert_eq!(chunk_of_world_x(-0.1), -1);
+        assert_eq!(chunk_of_world_z(-16.0), -1);
+        assert_eq!(chunk_of_world_x(-16.1), -2);
+    }
+
+    #[test]
+    fn meshed_cube_is_half_a_meter_wide() {
+        let (opaque, _, _) = isolated_mesh(BlockType::Stone);
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_z = f32::MAX;
+        let mut max_z = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for corner in opaque.v.as_chunks::<3>().0 {
+            min_x = min_x.min(corner[0]);
+            max_x = max_x.max(corner[0]);
+            min_y = min_y.min(corner[1]);
+            max_y = max_y.max(corner[1]);
+            min_z = min_z.min(corner[2]);
+            max_z = max_z.max(corner[2]);
+        }
+        assert!((min_x - block_origin_x(8)).abs() < 1e-4);
+        assert!((max_x - block_origin_x(9)).abs() < 1e-4);
+        assert!((min_z - block_origin_z(8)).abs() < 1e-4);
+        assert!((max_z - block_origin_z(9)).abs() < 1e-4);
+        assert!((min_y - 100.0).abs() < 1e-4);
+        assert!((max_y - 101.0).abs() < 1e-4);
+    }
+
     #[test]
     fn gpu_block_uploads_use_two_bytes_per_voxel() {
         let mut chunk = super::Chunk::new(0, 0, 0);
         chunk.blocks[1][7][3] = crate::block::BlockType::BoneMeal;
         chunk.blocks[1][7][4] = crate::block::BlockType::Stone;
         let (blocks, light, liquid) = chunk.gpu_bytes();
-        assert_eq!(blocks.len(), 16 * 256 * 16 * 2);
-        assert_eq!(light.len(), 16 * 256 * 16);
+        assert_eq!(blocks.len(), CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH * 2);
+        assert_eq!(light.len(), CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH);
         assert_eq!(liquid.len(), light.len());
-        let offset = (4096 + 7 * 16 + 3) * 2;
+        let (x, y, z) = (1, 7, 3);
+        let offset = ((x * CHUNK_HEIGHT + y) * CHUNK_DEPTH + z) * 2;
         assert_eq!(
             &blocks[offset..offset + 2],
             &(crate::block::BlockType::BoneMeal as u16).to_le_bytes()
@@ -2753,8 +2908,6 @@ mod tests {
             &(crate::block::BlockType::Stone as u16).to_le_bytes()
         );
     }
-
-    use super::*;
 
     fn isolated_mesh(block: BlockType) -> (MeshData, MeshData, MeshData) {
         let mut chunk = Chunk::new(0, 0, 42);
@@ -2936,7 +3089,11 @@ mod tests {
 
         let actual = MeshSnapshot::build(0, 0, neighbors, fallback_pattern);
         assert_snapshot_matches_ground_truth(&actual, 0, 0, neighbors, fallback_pattern);
-        assert_eq!(unpack_light(actual.get_light(16, 64, 0)), (15, 0));
+        // The first column of the missing east neighbor keeps the default sky light.
+        assert_eq!(
+            unpack_light(actual.get_light(CHUNK_WIDTH as i32, 64, 0)),
+            (15, 0)
+        );
     }
 
     #[test]

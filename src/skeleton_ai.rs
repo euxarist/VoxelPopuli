@@ -1,5 +1,6 @@
 //! Bedrock skeleton goals. Published settings and engine approximations are
 //! distinguished in docs/skeleton-combat.md. No renderer or world allocation.
+use crate::chunk::{BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z};
 use crate::{block::BlockType, inventory::ItemStack, mob::MobKind};
 use glam::{IVec3, Vec3};
 use std::collections::{HashMap, VecDeque};
@@ -322,6 +323,11 @@ pub fn find_path(
     goal: impl Fn(IVec3) -> bool,
     standable: impl Fn(IVec3) -> bool,
 ) -> Vec<Vec3> {
+    let max_x = (16.0 / BLOCK_SIZE_X).round() as i32;
+    let max_y = (16.0 / BLOCK_SIZE_Y).round() as i32;
+    let max_z = (16.0 / BLOCK_SIZE_Z).round() as i32;
+    // The old 768-node budget covered a 16 m disk on 1 m cells.
+    let node_budget = (768.0 / (BLOCK_SIZE_X * BLOCK_SIZE_Z)).round() as usize;
     let mut queue = VecDeque::from([start]);
     let mut parents = HashMap::from([(start, start)]);
     while let Some(node) = queue.pop_front() {
@@ -335,13 +341,14 @@ pub fn find_path(
             route.reverse();
             return route;
         }
-        if parents.len() >= 768 {
+        if parents.len() >= node_budget {
             break;
         }
         for direction in [IVec3::X, -IVec3::X, IVec3::Z, -IVec3::Z] {
             for dy in [0, 1, -1, -2, -3] {
                 let next = node + direction + IVec3::Y * dy;
-                if (next - start).abs().max_element() > 16 || !standable(next) {
+                let span = (next - start).abs();
+                if span.x > max_x || span.y > max_y || span.z > max_z || !standable(next) {
                     continue;
                 }
                 if let std::collections::hash_map::Entry::Vacant(entry) = parents.entry(next) {
