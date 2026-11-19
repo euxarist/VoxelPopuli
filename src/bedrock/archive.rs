@@ -56,8 +56,9 @@ pub fn unpack(source: &Path, destination: &Path) -> io::Result<()> {
     let mut total = 0u64;
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(io::Error::other)?;
-        let path = relative_path(entry.name())?;
-        if !names.insert(entry.name().trim_end_matches('/').to_ascii_lowercase()) {
+        let raw_name = entry.name().map_err(io::Error::other)?;
+        let path = relative_path(&raw_name)?;
+        if !names.insert(raw_name.trim_end_matches('/').to_ascii_lowercase()) {
             return Err(invalid("Duplicate or case-colliding archive path"));
         }
         if let Some(mode) = entry.unix_mode() {
@@ -66,7 +67,7 @@ pub fn unpack(source: &Path, destination: &Path) -> io::Result<()> {
                 return Err(invalid("World archive contains a special file"));
             }
         }
-        let name = entry.name().strip_suffix('/').unwrap_or(entry.name());
+        let name = raw_name.strip_suffix('/').unwrap_or(&raw_name);
         let components: Vec<_> = name.split('/').collect();
         for end in 1..=components.len() {
             let prefix = components[..end].join("/");
@@ -80,8 +81,8 @@ pub fn unpack(source: &Path, destination: &Path) -> io::Result<()> {
             }
         }
         if !entry.is_dir() {
-            required[0] |= entry.name() == "level.dat";
-            required[1] |= entry.name() == "db/CURRENT";
+            required[0] |= raw_name == "level.dat";
+            required[1] |= raw_name == "db/CURRENT";
         }
         total = total
             .checked_add(entry.size())
